@@ -2,12 +2,16 @@
  * winsftp.c: the Windows-specific parts of PSFTP and PSCP.
  */
 
+#include <winsock2.h> /* need to put this first, for winelib builds */
 #include <assert.h>
+
+#define NEED_DECLARATION_OF_SELECT
 
 #include "putty.h"
 #include "psftp.h"
 #include "ssh.h"
 #include "int64.h"
+#include "winsecur.h"
 
 char *get_ttymode(void *frontend, const char *mode) { return NULL; }
 
@@ -102,8 +106,12 @@ RFile *open_existing_file(const char *name, uint64 *size,
     ret = snew(RFile);
     ret->h = h;
 
-    if (size)
-        size->lo=GetFileSize(h, &(size->hi));
+    if (size) {
+        DWORD lo, hi;
+        lo = GetFileSize(h, &hi);
+        size->lo = lo;
+        size->hi = hi;
+    }
 
     if (mtime || atime) {
 	FILETIME actime, wrtime;
@@ -170,8 +178,12 @@ WFile *open_existing_wfile(const char *name, uint64 *size)
     ret = snew(WFile);
     ret->h = h;
 
-    if (size)
-	size->lo=GetFileSize(h, &(size->hi));
+    if (size) {
+        DWORD lo, hi;
+        lo = GetFileSize(h, &hi);
+        size->lo = lo;
+        size->hi = hi;
+    }
 
     return ret;
 }
@@ -221,7 +233,10 @@ int seek_file(WFile *f, uint64 offset, int whence)
 	return -1;
     }
 
-    SetFilePointer(f->h, offset.lo, &(offset.hi), movemethod);
+    {
+        LONG lo = offset.lo, hi = offset.hi;
+        SetFilePointer(f->h, lo, &hi, movemethod);
+    }
     
     if (GetLastError() != NO_ERROR)
 	return -1;
@@ -232,9 +247,11 @@ int seek_file(WFile *f, uint64 offset, int whence)
 uint64 get_file_posn(WFile *f)
 {
     uint64 ret;
+    LONG lo, hi = 0;
 
-    ret.hi = 0L;
-    ret.lo = SetFilePointer(f->h, 0L, &(ret.hi), FILE_CURRENT);
+    lo = SetFilePointer(f->h, 0L, &hi, FILE_CURRENT);
+    ret.lo = lo;
+    ret.hi = hi;
 
     return ret;
 }
@@ -481,7 +498,6 @@ char *do_select(SOCKET skt, int startup)
     }
     return NULL;
 }
-extern int select_result(WPARAM, LPARAM);
 
 int do_eventsel_loop(HANDLE other_event)
 {
@@ -530,7 +546,6 @@ int do_eventsel_loop(HANDLE other_event)
 	WSANETWORKEVENTS things;
 	SOCKET socket;
 	extern SOCKET first_socket(int *), next_socket(int *);
-	extern int select_result(WPARAM, LPARAM);
 	int i, socketstate;
 
 	/*
@@ -733,12 +748,21 @@ char *ssh_sftp_get_cmdline(const char *prompt, int no_fds_ok)
     return ctx->line;
 }
 
+void platform_psftp_pre_conn_setup(void)
+{
+    if (restricted_acl) {
+	logevent(NULL, "Running with restricted process ACL");
+    }
+}
+
 /* ----------------------------------------------------------------------
  * Main program. Parse arguments etc.
  */
 int main(int argc, char *argv[])
 {
     int ret;
+
+    dll_hijacking_protection();
 
     ret = psftp_main(argc, argv);
 

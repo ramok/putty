@@ -306,6 +306,9 @@ char *get_ttymode(void *frontend, const char *mode)
 #if defined(XCASE)
     GET_BOOL("XCASE", XCASE, c_lflag, );
 #endif
+#if defined(IUTF8)
+    GET_BOOL("IUTF8", IUTF8, c_iflag, );
+#endif
     /* Configuration of ECHO */
 #if defined(ECHOCTL)
     GET_BOOL("ECHOCTL", ECHOCTL, c_lflag, );
@@ -555,6 +558,8 @@ static void usage(void)
     printf("  -P port   connect to specified port\n");
     printf("  -l user   connect with specified username\n");
     printf("  -batch    disable all interactive prompts\n");
+    printf("  -proxycmd command\n");
+    printf("            use 'command' as local proxy\n");
     printf("  -sercfg configuration-string (e.g. 19200,8,n,1,X)\n");
     printf("            Specify the serial configuration (serial only)\n");
     printf("The following options only apply to SSH connections:\n");
@@ -591,14 +596,18 @@ static void usage(void)
 
 static void version(void)
 {
-    printf("plink: %s\n", ver);
-    exit(1);
+    char *buildinfo_text = buildinfo("\n");
+    printf("plink: %s\n%s\n", ver, buildinfo_text);
+    sfree(buildinfo_text);
+    exit(0);
 }
 
 void frontend_net_error_pending(void) {}
 
 const int share_can_be_downstream = TRUE;
 const int share_can_be_upstream = TRUE;
+
+const int buildinfo_gtk_relevant = FALSE;
 
 int main(int argc, char **argv)
 {
@@ -607,7 +616,6 @@ int main(int argc, char **argv)
     int *fdlist;
     int fd;
     int i, fdcount, fdsize, fdstate;
-    int connopen;
     int exitcode;
     int errors;
     int use_subsystem = 0;
@@ -946,6 +954,11 @@ int main(int argc, char **argv)
 	perror("pipe");
 	exit(1);
     }
+    /* We don't want the signal handler to block if the pipe's full. */
+    nonblock(signalpipe[0]);
+    nonblock(signalpipe[1]);
+    cloexec(signalpipe[0]);
+    cloexec(signalpipe[1]);
     putty_signal(SIGWINCH, sigwinch);
 
     /*
@@ -961,7 +974,7 @@ int main(int argc, char **argv)
     uxsel_init();
 
     /*
-     * Unix Plink doesn't provide any way to add forwardings after the
+     * Plink doesn't provide any way to add forwardings after the
      * connection is set up, so if there are none now, we can safely set
      * the "simple" flag.
      */
@@ -1013,7 +1026,6 @@ int main(int argc, char **argv)
 	ldisc_create(conf, NULL, back, backhandle, NULL);
 	sfree(realhost);
     }
-    connopen = 1;
 
     /*
      * Set up the initial console mode. We don't care if this call
@@ -1040,7 +1052,7 @@ int main(int argc, char **argv)
 
 	FD_SET_MAX(signalpipe[0], maxfd, rset);
 
-	if (connopen && !sending &&
+	if (!sending &&
 	    back->connected(backhandle) &&
 	    back->sendok(backhandle) &&
 	    back->sendbuffer(backhandle) < MAX_STDIN_BACKLOG) {
@@ -1114,6 +1126,9 @@ int main(int argc, char **argv)
             ret = select(maxfd, &rset, &wset, &xset, NULL);
         }
 
+        if (ret < 0 && errno == EINTR)
+            continue;
+
 	if (ret < 0) {
 	    perror("select");
 	    exit(1);
@@ -1148,7 +1163,7 @@ int main(int argc, char **argv)
 	    char buf[4096];
 	    int ret;
 
-	    if (connopen && back->connected(backhandle)) {
+	    if (back->connected(backhandle)) {
 		ret = read(STDIN_FILENO, buf, sizeof(buf));
 		if (ret < 0) {
 		    perror("stdin: read");
@@ -1175,7 +1190,7 @@ int main(int argc, char **argv)
 
         run_toplevel_callbacks();
 
-	if ((!connopen || !back->connected(backhandle)) &&
+	if (!back->connected(backhandle) &&
 	    bufchain_size(&stdout_data) == 0 &&
 	    bufchain_size(&stderr_data) == 0)
 	    break;		       /* we closed the connection */

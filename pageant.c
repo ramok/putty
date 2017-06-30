@@ -406,6 +406,7 @@ void *pageant_handle_msg(const void *msg, int msglen, int *outlen,
 	    if (i < 0) {
                 freebn(reqkey.exponent);
                 freebn(reqkey.modulus);
+		freebn(challenge);
                 fail_reason = "request truncated before challenge";
 		goto failure;
             }
@@ -963,11 +964,11 @@ int pageant_delete_ssh2_key(struct ssh2_userkey *skey)
  * Coroutine macros similar to, but simplified from, those in ssh.c.
  */
 #define crBegin(v)	{ int *crLine = &v; switch(v) { case 0:;
-#define crFinish(z)	} *crLine = 0; return (z); }
+#define crFinishV	} *crLine = 0; return; }
 #define crGetChar(c) do                                         \
     {                                                           \
         while (len == 0) {                                      \
-            *crLine =__LINE__; return 1; case __LINE__:;        \
+            *crLine =__LINE__; return; case __LINE__:;          \
         }                                                       \
         len--;                                                  \
         (c) = (unsigned char)*data++;                           \
@@ -986,8 +987,8 @@ struct pageant_conn_state {
     int crLine;            /* for coroutine in pageant_conn_receive */
 };
 
-static int pageant_conn_closing(Plug plug, const char *error_msg,
-                                int error_code, int calling_back)
+static void pageant_conn_closing(Plug plug, const char *error_msg,
+				 int error_code, int calling_back)
 {
     struct pageant_conn_state *pc = (struct pageant_conn_state *)plug;
     if (error_msg)
@@ -996,7 +997,6 @@ static int pageant_conn_closing(Plug plug, const char *error_msg,
         plog(pc->logctx, pc->logfn, "%p: connection closed", pc);
     sk_close(pc->connsock);
     sfree(pc);
-    return 1;
 }
 
 static void pageant_conn_sent(Plug plug, int bufsize)
@@ -1020,7 +1020,7 @@ static void pageant_conn_log(void *logctx, const char *fmt, va_list ap)
     sfree(formatted);
 }
 
-static int pageant_conn_receive(Plug plug, int urgent, char *data, int len)
+static void pageant_conn_receive(Plug plug, int urgent, char *data, int len)
 {
     struct pageant_conn_state *pc = (struct pageant_conn_state *)plug;
     char c;
@@ -1064,7 +1064,7 @@ static int pageant_conn_receive(Plug plug, int urgent, char *data, int len)
         }
     }
 
-    crFinish(1);
+    crFinishV;
 }
 
 struct pageant_listen_state {
@@ -1076,15 +1076,14 @@ struct pageant_listen_state {
     pageant_logfn_t logfn;
 };
 
-static int pageant_listen_closing(Plug plug, const char *error_msg,
-                                  int error_code, int calling_back)
+static void pageant_listen_closing(Plug plug, const char *error_msg,
+				   int error_code, int calling_back)
 {
     struct pageant_listen_state *pl = (struct pageant_listen_state *)plug;
     if (error_msg)
         plog(pl->logctx, pl->logfn, "listening socket: error: %s", error_msg);
     sk_close(pl->listensock);
     pl->listensock = NULL;
-    return 1;
 }
 
 static int pageant_listen_accepting(Plug plug,
@@ -1196,12 +1195,12 @@ void *pageant_get_keylist1(int *length)
     if (!pageant_local) {
 	unsigned char request[5], *response;
 	void *vresponse;
-	int resplen, retval;
+	int resplen;
+
 	request[4] = SSH1_AGENTC_REQUEST_RSA_IDENTITIES;
 	PUT_32BIT(request, 1);
 
-	retval = agent_query(request, 5, &vresponse, &resplen, NULL, NULL);
-	assert(retval == 1);
+        agent_query_synchronous(request, 5, &vresponse, &resplen);
 	response = vresponse;
 	if (resplen < 5 || response[4] != SSH1_AGENT_RSA_IDENTITIES_ANSWER) {
             sfree(response);
@@ -1227,13 +1226,12 @@ void *pageant_get_keylist2(int *length)
     if (!pageant_local) {
 	unsigned char request[5], *response;
 	void *vresponse;
-	int resplen, retval;
+	int resplen;
 
 	request[4] = SSH2_AGENTC_REQUEST_IDENTITIES;
 	PUT_32BIT(request, 1);
 
-	retval = agent_query(request, 5, &vresponse, &resplen, NULL, NULL);
-	assert(retval == 1);
+	agent_query_synchronous(request, 5, &vresponse, &resplen);
 	response = vresponse;
 	if (resplen < 5 || response[4] != SSH2_AGENT_IDENTITIES_ANSWER) {
             sfree(response);
@@ -1313,11 +1311,15 @@ int pageant_add_keyfile(Filename *filename, const char *passphrase,
 	if (keylist) {
 	    if (keylistlen < 4) {
 		*retstr = dupstr("Received broken key list from agent");
+                sfree(keylist);
+                sfree(blob);
 		return PAGEANT_ACTION_FAILURE;
 	    }
 	    nkeys = toint(GET_32BIT(keylist));
 	    if (nkeys < 0) {
 		*retstr = dupstr("Received broken key list from agent");
+                sfree(keylist);
+                sfree(blob);
 		return PAGEANT_ACTION_FAILURE;
 	    }
 	    p = keylist + 4;
@@ -1335,6 +1337,8 @@ int pageant_add_keyfile(Filename *filename, const char *passphrase,
 		    int n = rsa_public_blob_len(p, keylistlen);
 		    if (n < 0) {
                         *retstr = dupstr("Received broken key list from agent");
+                        sfree(keylist);
+                        sfree(blob);
                         return PAGEANT_ACTION_FAILURE;
 		    }
 		    p += n;
@@ -1343,11 +1347,18 @@ int pageant_add_keyfile(Filename *filename, const char *passphrase,
 		    int n;
 		    if (keylistlen < 4) {
                         *retstr = dupstr("Received broken key list from agent");
+                        sfree(keylist);
+                        sfree(blob);
                         return PAGEANT_ACTION_FAILURE;
 		    }
-		    n = toint(4 + GET_32BIT(p));
-		    if (n < 0 || keylistlen < n) {
+		    n = GET_32BIT(p);
+                    p += 4;
+                    keylistlen -= 4;
+
+		    if (n < 0 || n > keylistlen) {
                         *retstr = dupstr("Received broken key list from agent");
+                        sfree(keylist);
+                        sfree(blob);
                         return PAGEANT_ACTION_FAILURE;
 		    }
 		    p += n;
@@ -1358,11 +1369,18 @@ int pageant_add_keyfile(Filename *filename, const char *passphrase,
 		    int n;
 		    if (keylistlen < 4) {
                         *retstr = dupstr("Received broken key list from agent");
+                        sfree(keylist);
+                        sfree(blob);
                         return PAGEANT_ACTION_FAILURE;
 		    }
-		    n = toint(4 + GET_32BIT(p));
-		    if (n < 0 || keylistlen < n) {
+		    n = GET_32BIT(p);
+                    p += 4;
+                    keylistlen -= 4;
+
+		    if (n < 0 || n > keylistlen) {
                         *retstr = dupstr("Received broken key list from agent");
+                        sfree(keylist);
+                        sfree(blob);
                         return PAGEANT_ACTION_FAILURE;
 		    }
 		    p += n;
@@ -1409,6 +1427,7 @@ int pageant_add_keyfile(Filename *filename, const char *passphrase,
                  * Run out of passphrases to try.
                  */
                 *retstr = comment;
+                sfree(rkey);
                 return PAGEANT_ACTION_NEED_PP;
             }
 	} else
@@ -1432,6 +1451,7 @@ int pageant_add_keyfile(Filename *filename, const char *passphrase,
              * a bad passphrase.
              */
             *retstr = dupstr(error);
+            sfree(rkey);
             return PAGEANT_ACTION_FAILURE;
         } else if (ret == 1) {
             /*
@@ -1447,7 +1467,7 @@ int pageant_add_keyfile(Filename *filename, const char *passphrase,
     }
 
     /*
-     * If we get here, we've succesfully loaded the key into
+     * If we get here, we've successfully loaded the key into
      * rkey/skey, but not yet added it to the agent.
      */
 
@@ -1471,7 +1491,7 @@ int pageant_add_keyfile(Filename *filename, const char *passphrase,
 	if (!pageant_local) {
 	    unsigned char *request, *response;
 	    void *vresponse;
-	    int reqlen, clen, resplen, ret;
+	    int reqlen, clen, resplen;
 
 	    clen = strlen(rkey->comment);
 
@@ -1504,19 +1524,24 @@ int pageant_add_keyfile(Filename *filename, const char *passphrase,
 	    reqlen += 4 + clen;
 	    PUT_32BIT(request, reqlen - 4);
 
-	    ret = agent_query(request, reqlen, &vresponse, &resplen,
-			      NULL, NULL);
-	    assert(ret == 1);
+	    agent_query_synchronous(request, reqlen, &vresponse, &resplen);
 	    response = vresponse;
 	    if (resplen < 5 || response[4] != SSH_AGENT_SUCCESS) {
 		*retstr = dupstr("The already running Pageant "
                                  "refused to add the key.");
+                freersakey(rkey);
+                sfree(rkey);
+                sfree(request);
+                sfree(response);
                 return PAGEANT_ACTION_FAILURE;
             }
+            freersakey(rkey);
+            sfree(rkey);
 	    sfree(request);
 	    sfree(response);
 	} else {
 	    if (!pageant_add_ssh1_key(rkey)) {
+                freersakey(rkey);
 		sfree(rkey);	       /* already present, don't waste RAM */
             }
 	}
@@ -1524,7 +1549,7 @@ int pageant_add_keyfile(Filename *filename, const char *passphrase,
 	if (!pageant_local) {
 	    unsigned char *request, *response;
 	    void *vresponse;
-	    int reqlen, alglen, clen, keybloblen, resplen, ret;
+	    int reqlen, alglen, clen, keybloblen, resplen;
 	    alglen = strlen(skey->alg->name);
 	    clen = strlen(skey->comment);
 
@@ -1552,13 +1577,13 @@ int pageant_add_keyfile(Filename *filename, const char *passphrase,
 	    reqlen += clen + 4;
 	    PUT_32BIT(request, reqlen - 4);
 
-	    ret = agent_query(request, reqlen, &vresponse, &resplen,
-			      NULL, NULL);
-	    assert(ret == 1);
+	    agent_query_synchronous(request, reqlen, &vresponse, &resplen);
 	    response = vresponse;
 	    if (resplen < 5 || response[4] != SSH_AGENT_SUCCESS) {
 		*retstr = dupstr("The already running Pageant "
                                  "refused to add the key.");
+                sfree(request);
+                sfree(response);
                 return PAGEANT_ACTION_FAILURE;
             }
 
@@ -1741,8 +1766,7 @@ int pageant_delete_key(struct pageant_pubkey *key, char **retstr)
         memcpy(request + 9, key->blob, key->bloblen);
     }
 
-    ret = agent_query(request, reqlen, &vresponse, &resplen, NULL, NULL);
-    assert(ret == 1);
+    agent_query_synchronous(request, reqlen, &vresponse, &resplen);
     response = vresponse;
     if (resplen < 5 || response[4] != SSH_AGENT_SUCCESS) {
         *retstr = dupstr("Agent failed to delete key");
@@ -1759,14 +1783,13 @@ int pageant_delete_key(struct pageant_pubkey *key, char **retstr)
 int pageant_delete_all_keys(char **retstr)
 {
     unsigned char request[5], *response;
-    int reqlen, resplen, success, ret;
+    int reqlen, resplen, success;
     void *vresponse;
 
     PUT_32BIT(request, 1);
     request[4] = SSH2_AGENTC_REMOVE_ALL_IDENTITIES;
     reqlen = 5;
-    ret = agent_query(request, reqlen, &vresponse, &resplen, NULL, NULL);
-    assert(ret == 1);
+    agent_query_synchronous(request, reqlen, &vresponse, &resplen);
     response = vresponse;
     success = (resplen >= 4 && response[4] == SSH_AGENT_SUCCESS);
     sfree(response);
@@ -1778,8 +1801,7 @@ int pageant_delete_all_keys(char **retstr)
     PUT_32BIT(request, 1);
     request[4] = SSH1_AGENTC_REMOVE_ALL_RSA_IDENTITIES;
     reqlen = 5;
-    ret = agent_query(request, reqlen, &vresponse, &resplen, NULL, NULL);
-    assert(ret == 1);
+    agent_query_synchronous(request, reqlen, &vresponse, &resplen);
     response = vresponse;
     success = (resplen >= 4 && response[4] == SSH_AGENT_SUCCESS);
     sfree(response);

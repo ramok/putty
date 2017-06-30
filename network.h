@@ -64,12 +64,12 @@ struct plug_function_table {
      *    proxy command, so the receiver should probably prefix it to
      *    indicate this.
      */
-    int (*closing)
+    void (*closing)
      (Plug p, const char *error_msg, int error_code, int calling_back);
     /* error_msg is NULL iff it is not an error (ie it closed normally) */
     /* calling_back != 0 iff there is a Plug function */
     /* currently running (would cure the fixme in try_send()) */
-    int (*receive) (Plug p, int urgent, char *data, int len);
+    void (*receive) (Plug p, int urgent, char *data, int len);
     /*
      *  - urgent==0. `data' points to `len' bytes of perfectly
      *    ordinary data.
@@ -229,7 +229,10 @@ Socket new_error_socket(const char *errmsg, Plug plug);
 void backend_socket_log(void *frontend, int type, SockAddr addr, int port,
                         const char *error_msg, int error_code, Conf *conf,
                         int session_started);
+#ifndef BUFCHAIN_TYPEDEF
 typedef struct bufchain_tag bufchain;  /* rest of declaration in misc.c */
+#define BUFCHAIN_TYPEDEF
+#endif
 void log_proxy_stderr(Plug plug, bufchain *buf, const void *vdata, int len);
 
 #endif

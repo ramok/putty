@@ -11,6 +11,7 @@
 #include <dlfcn.h>		       /* Dynamic library loading */
 #endif /*  NO_LIBDL */
 #include "charset.h"
+#include <sys/types.h>         /* for mode_t */
 
 #ifdef OSX_GTK
 /*
@@ -29,7 +30,31 @@
 #define META_MANUAL_MASK (GDK_MOD1_MASK)
 #define JUST_USE_GTK_CLIPBOARD_UTF8 /* low-level gdk_selection_* fails */
 #define DEFAULT_CLIPBOARD GDK_SELECTION_CLIPBOARD /* OS X has no PRIMARY */
+
+#define BUILDINFO_PLATFORM_GTK "OS X (GTK)"
+#define BUILDINFO_GTK
+
+#elif defined NOT_X_WINDOWS
+
+#define BUILDINFO_PLATFORM_GTK "Unix (pure GTK)"
+#define BUILDINFO_GTK
+
+#else
+
+#define BUILDINFO_PLATFORM_GTK "Unix (GTK + X11)"
+#define BUILDINFO_GTK
+
 #endif
+
+/* BUILDINFO_PLATFORM varies its expansion between the GTK and
+ * pure-CLI utilities, so that Unix Plink, PSFTP etc don't announce
+ * themselves incongruously as having something to do with GTK. */
+#define BUILDINFO_PLATFORM_CLI "Unix"
+extern const int buildinfo_gtk_relevant;
+#define BUILDINFO_PLATFORM (buildinfo_gtk_relevant ? \
+                            BUILDINFO_PLATFORM_GTK : BUILDINFO_PLATFORM_CLI)
+
+char *buildinfo_gtk_version(void);
 
 struct Filename {
     char *path;
@@ -74,7 +99,7 @@ typedef uint32_t uint32; /* C99: uint32_t defined in stdint.h */
 #define SEL_NL { 10 }
 
 /* Simple wraparound timer function */
-unsigned long getticks(void);	       /* based on gettimeofday(2) */
+unsigned long getticks(void);
 #define GETTICKCOUNT getticks
 #define TICKSPERSEC    1000	       /* we choose to use milliseconds */
 #define CURSORBLINK     450	       /* no standard way to set this */
@@ -94,11 +119,25 @@ unsigned long getticks(void);	       /* based on gettimeofday(2) */
  */
 #define FLAG_STDERR_TTY 0x1000
 
+/* The per-session frontend structure managed by gtkwin.c */
+struct gui_data;
+struct gui_data *new_session_window(Conf *conf, const char *geometry_string);
+
+/* Defined in gtkmain.c */
+void launch_duplicate_session(Conf *conf);
+void launch_new_session(void);
+void launch_saved_session(const char *str);
+#ifdef MAY_REFER_TO_GTK_IN_HEADERS
+GtkWidget *make_gtk_toplevel_window(void *frontend);
+#endif
+
+/* Defined in gtkcomm.c */
+void gtkcomm_setup(void);
+
 /* Things pty.c needs from pterm.c */
 const char *get_x_display(void *frontend);
 int font_dimension(void *frontend, int which);/* 0 for width, 1 for height */
 long get_windowid(void *frontend);
-int frontend_is_utf8(void *frontend);
 
 /* Things gtkdlg.c needs from pterm.c */
 void *get_window(void *frontend);      /* void * to avoid depending on gtk.h */
@@ -141,10 +180,10 @@ void postmsg(struct termios *);
 /* The interface used by uxsel.c */
 typedef struct uxsel_id uxsel_id;
 void uxsel_init(void);
-typedef int (*uxsel_callback_fn)(int fd, int event);
+typedef void (*uxsel_callback_fn)(int fd, int event);
 void uxsel_set(int fd, int rwx, uxsel_callback_fn callback);
 void uxsel_del(int fd);
-int select_result(int fd, int event);
+void select_result(int fd, int event);
 int first_fd(int *state, int *rwx);
 int next_fd(int *state, int *rwx);
 /* The following are expected to be provided _to_ uxsel.c by the frontend */
@@ -182,6 +221,7 @@ void noncloexec(int);
 int nonblock(int);
 int no_nonblock(int);
 char *make_dir_and_check_ours(const char *dirname);
+char *make_dir_path(const char *path, mode_t mode);
 
 /*
  * Exports from unicode.c.

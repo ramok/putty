@@ -5,11 +5,15 @@
  * unfix.org.
  */
 
+#include <winsock2.h> /* need to put this first, for winelib builds */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
 
 #define DEFINE_PLUG_METHOD_MACROS
+#define NEED_DECLARATION_OF_SELECT     /* in order to initialise it */
+
 #include "putty.h"
 #include "network.h"
 #include "tree234.h"
@@ -17,8 +21,15 @@
 #include <ws2tcpip.h>
 
 #ifndef NO_IPV6
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wmissing-braces"
+#endif
 const struct in6_addr in6addr_any = IN6ADDR_ANY_INIT;
 const struct in6_addr in6addr_loopback = IN6ADDR_LOOPBACK_INIT;
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
 #endif
 
 #define ipv4_is_loopback(addr) \
@@ -229,6 +240,13 @@ int sk_startup(int hi, int lo)
     return TRUE;
 }
 
+/* Actually define this function pointer, which won't have been
+ * defined alongside all the others by PUTTY_DO_GLOBALS because of the
+ * annoying winelib header-ordering issue. (See comment in winstuff.h.) */
+DECL_WINDOWS_FUNCTION(/* empty */, int, select,
+		      (int, fd_set FAR *, fd_set FAR *,
+		       fd_set FAR *, const struct timeval FAR *));
+
 void sk_init(void)
 {
 #ifndef NO_IPV6
@@ -250,7 +268,10 @@ void sk_init(void)
 	GET_WINDOWS_FUNCTION(winsock_module, getaddrinfo);
 	GET_WINDOWS_FUNCTION(winsock_module, freeaddrinfo);
 	GET_WINDOWS_FUNCTION(winsock_module, getnameinfo);
-	GET_WINDOWS_FUNCTION(winsock_module, gai_strerror);
+        /* This function would fail its type-check if we did one,
+         * because the VS header file provides an inline definition
+         * which is __cdecl instead of WINAPI. */
+        GET_WINDOWS_FUNCTION_NO_TYPECHECK(winsock_module, gai_strerror);
     } else {
 	/* Fall back to wship6.dll for Windows 2000 */
 	wship6_module = load_system32_dll("wship6.dll");
@@ -261,7 +282,8 @@ void sk_init(void)
 	    GET_WINDOWS_FUNCTION(wship6_module, getaddrinfo);
 	    GET_WINDOWS_FUNCTION(wship6_module, freeaddrinfo);
 	    GET_WINDOWS_FUNCTION(wship6_module, getnameinfo);
-	    GET_WINDOWS_FUNCTION(wship6_module, gai_strerror);
+            /* See comment above about type check */
+            GET_WINDOWS_FUNCTION_NO_TYPECHECK(winsock_module, gai_strerror);
 	} else {
 #ifdef NET_SETUP_DIAGNOSTICS
 	    logevent(NULL, "No IPv6 support detected");
@@ -283,16 +305,32 @@ void sk_init(void)
     GET_WINDOWS_FUNCTION(winsock_module, WSAStartup);
     GET_WINDOWS_FUNCTION(winsock_module, WSACleanup);
     GET_WINDOWS_FUNCTION(winsock_module, closesocket);
+#ifndef COVERITY
     GET_WINDOWS_FUNCTION(winsock_module, ntohl);
     GET_WINDOWS_FUNCTION(winsock_module, htonl);
     GET_WINDOWS_FUNCTION(winsock_module, htons);
     GET_WINDOWS_FUNCTION(winsock_module, ntohs);
     GET_WINDOWS_FUNCTION(winsock_module, gethostname);
+#else
+    /* The toolchain I use for Windows Coverity builds doesn't know
+     * the type signatures of these */
+    GET_WINDOWS_FUNCTION_NO_TYPECHECK(winsock_module, ntohl);
+    GET_WINDOWS_FUNCTION_NO_TYPECHECK(winsock_module, htonl);
+    GET_WINDOWS_FUNCTION_NO_TYPECHECK(winsock_module, htons);
+    GET_WINDOWS_FUNCTION_NO_TYPECHECK(winsock_module, ntohs);
+    GET_WINDOWS_FUNCTION_NO_TYPECHECK(winsock_module, gethostname);
+#endif
     GET_WINDOWS_FUNCTION(winsock_module, gethostbyname);
     GET_WINDOWS_FUNCTION(winsock_module, getservbyname);
     GET_WINDOWS_FUNCTION(winsock_module, inet_addr);
     GET_WINDOWS_FUNCTION(winsock_module, inet_ntoa);
+#if (defined _MSC_VER && _MSC_VER < 1900) || defined __MINGW32__
+    /* Older Visual Studio, and MinGW as of Ubuntu 16.04, don't know
+     * about this function at all, so can't type-check it */
+    GET_WINDOWS_FUNCTION_NO_TYPECHECK(winsock_module, inet_ntop);
+#else
     GET_WINDOWS_FUNCTION(winsock_module, inet_ntop);
+#endif
     GET_WINDOWS_FUNCTION(winsock_module, connect);
     GET_WINDOWS_FUNCTION(winsock_module, bind);
     GET_WINDOWS_FUNCTION(winsock_module, setsockopt);
@@ -520,7 +558,7 @@ SockAddr sk_namelookup(const char *host, char **canonicalname,
 
     if ((a = p_inet_addr(host)) == (unsigned long) INADDR_NONE) {
 	struct hostent *h = NULL;
-	int err;
+	int err = 0;
 #ifndef NO_IPV6
 	/*
 	 * Use getaddrinfo when it's available
@@ -704,6 +742,35 @@ void sk_getaddr(SockAddr addr, char *buf, int buflen)
     }
 }
 
+/*
+ * This constructs a SockAddr that points at one specific sub-address
+ * of a parent SockAddr. The returned SockAddr does not own all its
+ * own memory: it points into the old one's data structures, so it
+ * MUST NOT be used after the old one is freed, and it MUST NOT be
+ * passed to sk_addr_free. (The latter is why it's returned by value
+ * rather than dynamically allocated - that should clue in anyone
+ * writing a call to it that something is weird about it.)
+ */
+static struct SockAddr_tag sk_extractaddr_tmp(
+    SockAddr addr, const SockAddrStep *step)
+{
+    struct SockAddr_tag toret;
+    toret = *addr;                    /* structure copy */
+    toret.refcount = 1;
+
+#ifndef NO_IPV6
+    toret.ais = step->ai;
+#endif
+    if (SOCKADDR_FAMILY(addr, *step) == AF_INET
+#ifndef NO_IPV6
+        && !toret.ais
+#endif
+        )
+        toret.addresses += step->curraddr;
+
+    return toret;
+}
+
 int sk_addr_needs_port(SockAddr addr)
 {
     return addr->namedpipe ? FALSE : TRUE;
@@ -726,6 +793,8 @@ static int ipv4_is_local_addr(struct in_addr addr)
     if (!n_local_interfaces) {
 	SOCKET s = p_socket(AF_INET, SOCK_DGRAM, 0);
 	DWORD retbytes;
+
+	SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0);
 
 	if (p_WSAIoctl &&
 	    p_WSAIoctl(s, SIO_GET_INTERFACE_LIST, NULL, 0,
@@ -947,7 +1016,11 @@ static DWORD try_connect(Actual_Socket sock)
         p_closesocket(sock->s);
     }
 
-    plug_log(sock->plug, 0, sock->addr, sock->port, NULL, 0);
+    {
+        struct SockAddr_tag thisaddr = sk_extractaddr_tmp(
+            sock->addr, &sock->step);
+        plug_log(sock->plug, 0, &thisaddr, sock->port, NULL, 0);
+    }
 
     /*
      * Open socket.
@@ -970,6 +1043,8 @@ static DWORD try_connect(Actual_Socket sock)
 	sock->error = winsock_error_string(err);
 	goto ret;
     }
+
+	SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0);
 
     if (sock->oobinline) {
 	BOOL b = TRUE;
@@ -1114,8 +1189,11 @@ static DWORD try_connect(Actual_Socket sock)
      */
     add234(sktree, sock);
 
-    if (err)
-	plug_log(sock->plug, 1, sock->addr, sock->port, sock->error, err);
+    if (err) {
+        struct SockAddr_tag thisaddr = sk_extractaddr_tmp(
+            sock->addr, &sock->step);
+	plug_log(sock->plug, 1, &thisaddr, sock->port, sock->error, err);
+    }
     return err;
 }
 
@@ -1248,6 +1326,8 @@ Socket sk_newlistener(const char *srcaddr, int port, Plug plug,
 	ret->error = winsock_error_string(err);
 	return (Socket) ret;
     }
+
+	SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0);
 
     ret->oobinline = 0;
 
@@ -1555,9 +1635,9 @@ static void sk_tcp_write_eof(Socket sock)
 	try_send(s);
 }
 
-int select_result(WPARAM wParam, LPARAM lParam)
+void select_result(WPARAM wParam, LPARAM lParam)
 {
-    int ret, open;
+    int ret;
     DWORD err;
     char buf[20480];		       /* nice big buffer for plenty of speed */
     Actual_Socket s;
@@ -1566,11 +1646,11 @@ int select_result(WPARAM wParam, LPARAM lParam)
     /* wParam is the socket itself */
 
     if (wParam == 0)
-	return 1;		       /* boggle */
+	return;		       /* boggle */
 
     s = find234(sktree, (void *) wParam, cmpforsearch);
     if (!s)
-	return 1;		       /* boggle */
+	return;		       /* boggle */
 
     if ((err = WSAGETSELECTERROR(lParam)) != 0) {
 	/*
@@ -1578,16 +1658,17 @@ int select_result(WPARAM wParam, LPARAM lParam)
 	 * plug.
 	 */
 	if (s->addr) {
-	    plug_log(s->plug, 1, s->addr, s->port,
+            struct SockAddr_tag thisaddr = sk_extractaddr_tmp(
+                s->addr, &s->step);
+	    plug_log(s->plug, 1, &thisaddr, s->port,
 		     winsock_error_string(err), err);
-	    while (s->addr && sk_nextaddr(s->addr, &s->step)) {
+	    while (err && s->addr && sk_nextaddr(s->addr, &s->step)) {
 		err = try_connect(s);
 	    }
 	}
 	if (err != 0)
-	    return plug_closing(s->plug, winsock_error_string(err), err, 0);
-	else
-	    return 1;
+	    plug_closing(s->plug, winsock_error_string(err), err, 0);
+	return;
     }
 
     noise_ultralight(lParam);
@@ -1640,12 +1721,11 @@ int select_result(WPARAM wParam, LPARAM lParam)
 	    }
 	}
 	if (ret < 0) {
-	    return plug_closing(s->plug, winsock_error_string(err), err,
-				0);
+	    plug_closing(s->plug, winsock_error_string(err), err, 0);
 	} else if (0 == ret) {
-	    return plug_closing(s->plug, NULL, 0, 0);
+	    plug_closing(s->plug, NULL, 0, 0);
 	} else {
-	    return plug_receive(s->plug, atmark ? 0 : 1, buf, ret);
+	    plug_receive(s->plug, atmark ? 0 : 1, buf, ret);
 	}
 	break;
       case FD_OOB:
@@ -1665,7 +1745,7 @@ int select_result(WPARAM wParam, LPARAM lParam)
 	    logevent(NULL, str);
 	    fatalbox("%s", str);
 	} else {
-	    return plug_receive(s->plug, 2, buf, ret);
+	    plug_receive(s->plug, 2, buf, ret);
 	}
 	break;
       case FD_WRITE:
@@ -1681,23 +1761,21 @@ int select_result(WPARAM wParam, LPARAM lParam)
 	break;
       case FD_CLOSE:
 	/* Signal a close on the socket. First read any outstanding data. */
-	open = 1;
 	do {
 	    ret = p_recv(s->s, buf, sizeof(buf), 0);
 	    if (ret < 0) {
 		err = p_WSAGetLastError();
 		if (err == WSAEWOULDBLOCK)
 		    break;
-		return plug_closing(s->plug, winsock_error_string(err),
-				    err, 0);
+		plug_closing(s->plug, winsock_error_string(err), err, 0);
 	    } else {
 		if (ret)
-		    open &= plug_receive(s->plug, 0, buf, ret);
+		    plug_receive(s->plug, 0, buf, ret);
 		else
-		    open &= plug_closing(s->plug, NULL, 0, 0);
+		    plug_closing(s->plug, NULL, 0, 0);
 	    }
 	} while (ret > 0);
-	return open;
+	return;
        case FD_ACCEPT:
 	{
 #ifdef NO_IPV6
@@ -1735,8 +1813,6 @@ int select_result(WPARAM wParam, LPARAM lParam)
 	    }
 	}
     }
-
-    return 1;
 }
 
 /*
@@ -1761,9 +1837,9 @@ static char *sk_tcp_peer_info(Socket sock)
     struct sockaddr_in addr;
 #else
     struct sockaddr_storage addr;
+    char buf[INET6_ADDRSTRLEN];
 #endif
     int addrlen = sizeof(addr);
-    char buf[INET6_ADDRSTRLEN];
 
     if (p_getpeername(s->s, (struct sockaddr *)&addr, &addrlen) < 0)
         return NULL;

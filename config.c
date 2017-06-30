@@ -466,6 +466,49 @@ static void kexlist_handler(union control *ctrl, void *dlg,
     }
 }
 
+static void hklist_handler(union control *ctrl, void *dlg,
+                            void *data, int event)
+{
+    Conf *conf = (Conf *)data;
+    if (event == EVENT_REFRESH) {
+        int i;
+
+        static const struct { const char *s; int k; } hks[] = {
+            { "Ed25519",               HK_ED25519 },
+            { "ECDSA",                 HK_ECDSA },
+            { "DSA",                   HK_DSA },
+            { "RSA",                   HK_RSA },
+            { "-- warn below here --", HK_WARN }
+        };
+
+        /* Set up the "host key preference" box. */
+        /* (hklist assumed to contain all algorithms) */
+        dlg_update_start(ctrl, dlg);
+        dlg_listbox_clear(ctrl, dlg);
+        for (i = 0; i < HK_MAX; i++) {
+            int k = conf_get_int_int(conf, CONF_ssh_hklist, i);
+            int j;
+            const char *kstr = NULL;
+            for (j = 0; j < lenof(hks); j++) {
+                if (hks[j].k == k) {
+                    kstr = hks[j].s;
+                    break;
+                }
+            }
+            dlg_listbox_addwithid(ctrl, dlg, kstr, k);
+        }
+        dlg_update_done(ctrl, dlg);
+
+    } else if (event == EVENT_VALCHANGE) {
+        int i;
+
+        /* Update array to match the list box. */
+        for (i=0; i < HK_MAX; i++)
+            conf_set_int_int(conf, CONF_ssh_hklist, i,
+                             dlg_listbox_getid(ctrl, dlg, i));
+    }
+}
+
 static void printerbox_handler(union control *ctrl, void *dlg,
 			       void *data, int event)
 {
@@ -903,8 +946,7 @@ static void colour_handler(union control *ctrl, void *dlg,
 }
 
 struct ttymodes_data {
-    union control *modelist, *valradio, *valbox;
-    union control *addbutton, *rembutton, *listbox;
+    union control *valradio, *valbox, *setbutton, *listbox;
 };
 
 static void ttymodes_handler(union control *ctrl, void *dlg,
@@ -923,69 +965,67 @@ static void ttymodes_handler(union control *ctrl, void *dlg,
 		 val != NULL;
 		 val = conf_get_str_strs(conf, CONF_ttymodes, key, &key)) {
 		char *disp = dupprintf("%s\t%s", key,
-				       (val[0] == 'A') ? "(auto)" : val+1);
+				       (val[0] == 'A') ? "(auto)" :
+				       ((val[0] == 'N') ? "(don't send)"
+							: val+1));
 		dlg_listbox_add(ctrl, dlg, disp);
 		sfree(disp);
 	    }
 	    dlg_update_done(ctrl, dlg);
-	} else if (ctrl == td->modelist) {
-	    int i;
-	    dlg_update_start(ctrl, dlg);
-	    dlg_listbox_clear(ctrl, dlg);
-	    for (i = 0; ttymodes[i]; i++)
-		dlg_listbox_add(ctrl, dlg, ttymodes[i]);
-	    dlg_listbox_select(ctrl, dlg, 0); /* *shrug* */
-	    dlg_update_done(ctrl, dlg);
 	} else if (ctrl == td->valradio) {
 	    dlg_radiobutton_set(ctrl, dlg, 0);
 	}
+    } else if (event == EVENT_SELCHANGE) {
+	if (ctrl == td->listbox) {
+	    int ind = dlg_listbox_index(td->listbox, dlg);
+	    char *val;
+	    if (ind < 0) {
+		return; /* no item selected */
+	    }
+	    val = conf_get_str_str(conf, CONF_ttymodes,
+				   conf_get_str_nthstrkey(conf, CONF_ttymodes,
+							  ind));
+	    assert(val != NULL);
+	    /* Do this first to defuse side-effects on radio buttons: */
+	    dlg_editbox_set(td->valbox, dlg, val+1);
+	    dlg_radiobutton_set(td->valradio, dlg,
+				val[0] == 'A' ? 0 : (val[0] == 'N' ? 1 : 2));
+	}
+    } else if (event == EVENT_VALCHANGE) {
+	if (ctrl == td->valbox) {
+	    /* If they're editing the text box, we assume they want its
+	     * value to be used. */
+	    dlg_radiobutton_set(td->valradio, dlg, 2);
+	}
     } else if (event == EVENT_ACTION) {
-	if (ctrl == td->addbutton) {
-	    int ind = dlg_listbox_index(td->modelist, dlg);
+	if (ctrl == td->setbutton) {
+	    int ind = dlg_listbox_index(td->listbox, dlg);
+	    const char *key;
+	    char *str, *val;
+	    char type;
+
+	    {
+                const char types[] = {'A', 'N', 'V'};
+		int button = dlg_radiobutton_get(td->valradio, dlg);
+		assert(button >= 0 && button < lenof(types));
+		type = types[button];
+	    }
+
+	    /* Construct new entry */
 	    if (ind >= 0) {
-		char type = dlg_radiobutton_get(td->valradio, dlg) ? 'V' : 'A';
-		const char *key;
-		char *str, *val;
-		/* Construct new entry */
-		key = ttymodes[ind];
-		str = dlg_editbox_get(td->valbox, dlg);
+		key = conf_get_str_nthstrkey(conf, CONF_ttymodes, ind);
+		str = (type == 'V' ? dlg_editbox_get(td->valbox, dlg)
+				   : dupstr(""));
 		val = dupprintf("%c%s", type, str);
 		sfree(str);
 		conf_set_str_str(conf, CONF_ttymodes, key, val);
 		sfree(val);
 		dlg_refresh(td->listbox, dlg);
-	    } else
+		dlg_listbox_select(td->listbox, dlg, ind);
+	    } else {
+		/* Not a multisel listbox, so this means nothing selected */
 		dlg_beep(dlg);
-	} else if (ctrl == td->rembutton) {
-	    int i = 0;
-	    char *key, *val;
-	    int multisel = dlg_listbox_index(td->listbox, dlg) < 0;
-	    for (val = conf_get_str_strs(conf, CONF_ttymodes, NULL, &key);
-		 val != NULL;
-		 val = conf_get_str_strs(conf, CONF_ttymodes, key, &key)) {
-		if (dlg_listbox_issel(td->listbox, dlg, i)) {
-		    if (!multisel) {
-			/* Populate controls with entry we're about to
-			 * delete, for ease of editing.
-			 * (If multiple entries were selected, don't
-			 * touch the controls.) */
-			int ind = 0;
-			val++;
-			while (ttymodes[ind]) {
-			    if (!strcmp(ttymodes[ind], key))
-				break;
-			    ind++;
-			}
-			dlg_listbox_select(td->modelist, dlg, ind);
-			dlg_radiobutton_set(td->valradio, dlg,
-					    (*val == 'V'));
-			dlg_editbox_set(td->valbox, dlg, val+1);
-		    }
-		    conf_del_str_str(conf, CONF_ttymodes, key);
-		}
-		i++;
 	    }
-	    dlg_refresh(td->listbox, dlg);
 	}
     }
 }
@@ -1647,6 +1687,10 @@ void setup_config_box(struct controlbox *b, int midsession,
 		  HELPCTX(features_retitle),
 		  conf_checkbox_handler,
 		  I(CONF_no_remote_wintitle));
+    ctrl_checkbox(s, "Disable remote-controlled clearing of scrollback", 'e',
+		  HELPCTX(features_clearscroll),
+		  conf_checkbox_handler,
+		  I(CONF_no_remote_clearscroll));
     ctrl_radiobuttons(s, "Response to remote title query (SECURITY):", 'q', 3,
 		      HELPCTX(features_qtitle),
 		      conf_radiobutton_handler,
@@ -2075,7 +2119,7 @@ void setup_config_box(struct controlbox *b, int midsession,
 
 	ctrl_radiobuttons(s, "Print proxy diagnostics "
                           "in the terminal window", 'r', 5,
-			  HELPCTX(proxy_main),
+			  HELPCTX(proxy_logging),
 			  conf_radiobutton_handler,
 			  I(CONF_proxy_log_to_term),
 			  "No", I(FORCE_OFF),
@@ -2205,14 +2249,12 @@ void setup_config_box(struct controlbox *b, int midsession,
 	if (!midsession) {
 	    s = ctrl_getset(b, "Connection/SSH", "protocol", "Protocol options");
 
-	    ctrl_radiobuttons(s, "Preferred SSH protocol version:", NO_SHORTCUT, 4,
+	    ctrl_radiobuttons(s, "SSH protocol version:", NO_SHORTCUT, 2,
 			      HELPCTX(ssh_protocol),
 			      conf_radiobutton_handler,
 			      I(CONF_sshprot),
-			      "1 only", 'l', I(0),
-			      "1", '1', I(1),
-			      "2", '2', I(2),
-			      "2 only", 'y', I(3), NULL);
+			      "2", '2', I(3),
+			      "1 (INSECURE)", '1', I(0), NULL);
 	}
 
 	/*
@@ -2250,12 +2292,27 @@ void setup_config_box(struct controlbox *b, int midsession,
 	}
 
 	/*
+	 * The 'Connection/SSH/Host keys' panel.
+	 */
+	if (protcfginfo != 1 && protcfginfo != -1) {
+	    ctrl_settitle(b, "Connection/SSH/Host keys",
+			  "Options controlling SSH host keys");
+
+	    s = ctrl_getset(b, "Connection/SSH/Host keys", "main",
+			    "Host key algorithm preference");
+	    c = ctrl_draglist(s, "Algorithm selection policy:", 's',
+			      HELPCTX(ssh_hklist),
+			      hklist_handler, P(NULL));
+	    c->listbox.height = 5;
+	}
+
+	/*
 	 * Manual host key configuration is irrelevant mid-session,
 	 * as we enforce that the host key for rekeys is the
 	 * same as that used at the start of the session.
 	 */
 	if (!midsession) {
-	    s = ctrl_getset(b, "Connection/SSH/Kex", "hostkeys",
+	    s = ctrl_getset(b, "Connection/SSH/Host keys", "hostkeys",
 			    "Manually configure host keys for this connection");
 
             ctrl_columns(s, 2, 75, 25);
@@ -2321,14 +2378,14 @@ void setup_config_box(struct controlbox *b, int midsession,
 			  "Options controlling SSH authentication");
 
 	    s = ctrl_getset(b, "Connection/SSH/Auth", "main", NULL);
-	    ctrl_checkbox(s, "Bypass authentication entirely (SSH-2 only)", 'b',
-			  HELPCTX(ssh_auth_bypass),
-			  conf_checkbox_handler,
-			  I(CONF_ssh_no_userauth));
 	    ctrl_checkbox(s, "Display pre-authentication banner (SSH-2 only)",
 			  'd', HELPCTX(ssh_auth_banner),
 			  conf_checkbox_handler,
 			  I(CONF_ssh_show_banner));
+	    ctrl_checkbox(s, "Bypass authentication entirely (SSH-2 only)", 'b',
+			  HELPCTX(ssh_auth_bypass),
+			  conf_checkbox_handler,
+			  I(CONF_ssh_no_userauth));
 
 	    s = ctrl_getset(b, "Connection/SSH/Auth", "methods",
 			    "Authentication methods");
@@ -2431,54 +2488,40 @@ void setup_config_box(struct controlbox *b, int midsession,
 			    "Terminal modes");
 	    td = (struct ttymodes_data *)
 		ctrl_alloc(b, sizeof(struct ttymodes_data));
-	    ctrl_columns(s, 2, 75, 25);
 	    c = ctrl_text(s, "Terminal modes to send:", HELPCTX(ssh_ttymodes));
-	    c->generic.column = 0;
-	    td->rembutton = ctrl_pushbutton(s, "Remove", 'r',
-					    HELPCTX(ssh_ttymodes),
-					    ttymodes_handler, P(td));
-	    td->rembutton->generic.column = 1;
-	    td->rembutton->generic.tabdelay = 1;
-	    ctrl_columns(s, 1, 100);
 	    td->listbox = ctrl_listbox(s, NULL, NO_SHORTCUT,
 				       HELPCTX(ssh_ttymodes),
 				       ttymodes_handler, P(td));
-	    td->listbox->listbox.multisel = 1;
-	    td->listbox->listbox.height = 4;
+	    td->listbox->listbox.height = 8;
 	    td->listbox->listbox.ncols = 2;
 	    td->listbox->listbox.percentages = snewn(2, int);
 	    td->listbox->listbox.percentages[0] = 40;
 	    td->listbox->listbox.percentages[1] = 60;
-	    ctrl_tabdelay(s, td->rembutton);
 	    ctrl_columns(s, 2, 75, 25);
-	    td->modelist = ctrl_droplist(s, "Mode:", 'm', 67,
-					 HELPCTX(ssh_ttymodes),
-					 ttymodes_handler, P(td));
-	    td->modelist->generic.column = 0;
-	    td->addbutton = ctrl_pushbutton(s, "Add", 'd',
+	    c = ctrl_text(s, "For selected mode, send:", HELPCTX(ssh_ttymodes));
+	    c->generic.column = 0;
+	    td->setbutton = ctrl_pushbutton(s, "Set", 's',
 					    HELPCTX(ssh_ttymodes),
 					    ttymodes_handler, P(td));
-	    td->addbutton->generic.column = 1;
-	    td->addbutton->generic.tabdelay = 1;
+	    td->setbutton->generic.column = 1;
+	    td->setbutton->generic.tabdelay = 1;
 	    ctrl_columns(s, 1, 100);	    /* column break */
 	    /* Bit of a hack to get the value radio buttons and
 	     * edit-box on the same row. */
-	    ctrl_columns(s, 3, 25, 50, 25);
-	    c = ctrl_text(s, "Value:", HELPCTX(ssh_ttymodes));
-	    c->generic.column = 0;
-	    td->valradio = ctrl_radiobuttons(s, NULL, NO_SHORTCUT, 2,
+	    ctrl_columns(s, 2, 75, 25);
+	    td->valradio = ctrl_radiobuttons(s, NULL, NO_SHORTCUT, 3,
 					     HELPCTX(ssh_ttymodes),
 					     ttymodes_handler, P(td),
 					     "Auto", NO_SHORTCUT, P(NULL),
+					     "Nothing", NO_SHORTCUT, P(NULL),
 					     "This:", NO_SHORTCUT, P(NULL),
 					     NULL);
-	    td->valradio->generic.column = 1;
+	    td->valradio->generic.column = 0;
 	    td->valbox = ctrl_editbox(s, NULL, NO_SHORTCUT, 100,
 				      HELPCTX(ssh_ttymodes),
 				      ttymodes_handler, P(td), P(NULL));
-	    td->valbox->generic.column = 2;
-	    ctrl_tabdelay(s, td->addbutton);
-
+	    td->valbox->generic.column = 1;
+	    ctrl_tabdelay(s, td->setbutton);
 	}
 
 	if (!midsession) {
@@ -2584,27 +2627,21 @@ void setup_config_box(struct controlbox *b, int midsession,
 
 	    s = ctrl_getset(b, "Connection/SSH/Bugs", "main",
 			    "Detection of known bugs in SSH servers");
-	    ctrl_droplist(s, "Chokes on SSH-1 ignore messages", 'i', 20,
-			  HELPCTX(ssh_bugs_ignore1),
-			  sshbug_handler, I(CONF_sshbug_ignore1));
-	    ctrl_droplist(s, "Refuses all SSH-1 password camouflage", 's', 20,
-			  HELPCTX(ssh_bugs_plainpw1),
-			  sshbug_handler, I(CONF_sshbug_plainpw1));
-	    ctrl_droplist(s, "Chokes on SSH-1 RSA authentication", 'r', 20,
-			  HELPCTX(ssh_bugs_rsa1),
-			  sshbug_handler, I(CONF_sshbug_rsa1));
 	    ctrl_droplist(s, "Chokes on SSH-2 ignore messages", '2', 20,
 			  HELPCTX(ssh_bugs_ignore2),
 			  sshbug_handler, I(CONF_sshbug_ignore2));
+	    ctrl_droplist(s, "Handles SSH-2 key re-exchange badly", 'k', 20,
+			  HELPCTX(ssh_bugs_rekey2),
+			  sshbug_handler, I(CONF_sshbug_rekey2));
 	    ctrl_droplist(s, "Chokes on PuTTY's SSH-2 'winadj' requests", 'j',
                           20, HELPCTX(ssh_bugs_winadj),
 			  sshbug_handler, I(CONF_sshbug_winadj));
-	    ctrl_droplist(s, "Miscomputes SSH-2 HMAC keys", 'm', 20,
-			  HELPCTX(ssh_bugs_hmac2),
-			  sshbug_handler, I(CONF_sshbug_hmac2));
-	    ctrl_droplist(s, "Miscomputes SSH-2 encryption keys", 'e', 20,
-			  HELPCTX(ssh_bugs_derivekey2),
-			  sshbug_handler, I(CONF_sshbug_derivekey2));
+	    ctrl_droplist(s, "Replies to requests on closed channels", 'q', 20,
+			  HELPCTX(ssh_bugs_chanreq),
+			  sshbug_handler, I(CONF_sshbug_chanreq));
+	    ctrl_droplist(s, "Ignores SSH-2 maximum packet size", 'x', 20,
+			  HELPCTX(ssh_bugs_maxpkt2),
+			  sshbug_handler, I(CONF_sshbug_maxpkt2));
 
 	    ctrl_settitle(b, "Connection/SSH/More bugs",
 			  "Further workarounds for SSH server bugs");
@@ -2614,21 +2651,27 @@ void setup_config_box(struct controlbox *b, int midsession,
 	    ctrl_droplist(s, "Requires padding on SSH-2 RSA signatures", 'p', 20,
 			  HELPCTX(ssh_bugs_rsapad2),
 			  sshbug_handler, I(CONF_sshbug_rsapad2));
-	    ctrl_droplist(s, "Misuses the session ID in SSH-2 PK auth", 'n', 20,
-			  HELPCTX(ssh_bugs_pksessid2),
-			  sshbug_handler, I(CONF_sshbug_pksessid2));
-	    ctrl_droplist(s, "Handles SSH-2 key re-exchange badly", 'k', 20,
-			  HELPCTX(ssh_bugs_rekey2),
-			  sshbug_handler, I(CONF_sshbug_rekey2));
-	    ctrl_droplist(s, "Ignores SSH-2 maximum packet size", 'x', 20,
-			  HELPCTX(ssh_bugs_maxpkt2),
-			  sshbug_handler, I(CONF_sshbug_maxpkt2));
 	    ctrl_droplist(s, "Only supports pre-RFC4419 SSH-2 DH GEX", 'd', 20,
 			  HELPCTX(ssh_bugs_oldgex2),
 			  sshbug_handler, I(CONF_sshbug_oldgex2));
-	    ctrl_droplist(s, "Replies to requests on closed channels", 'q', 20,
-			  HELPCTX(ssh_bugs_chanreq),
-			  sshbug_handler, I(CONF_sshbug_chanreq));
+	    ctrl_droplist(s, "Miscomputes SSH-2 HMAC keys", 'm', 20,
+			  HELPCTX(ssh_bugs_hmac2),
+			  sshbug_handler, I(CONF_sshbug_hmac2));
+	    ctrl_droplist(s, "Misuses the session ID in SSH-2 PK auth", 'n', 20,
+			  HELPCTX(ssh_bugs_pksessid2),
+			  sshbug_handler, I(CONF_sshbug_pksessid2));
+	    ctrl_droplist(s, "Miscomputes SSH-2 encryption keys", 'e', 20,
+			  HELPCTX(ssh_bugs_derivekey2),
+			  sshbug_handler, I(CONF_sshbug_derivekey2));
+	    ctrl_droplist(s, "Chokes on SSH-1 ignore messages", 'i', 20,
+			  HELPCTX(ssh_bugs_ignore1),
+			  sshbug_handler, I(CONF_sshbug_ignore1));
+	    ctrl_droplist(s, "Refuses all SSH-1 password camouflage", 's', 20,
+			  HELPCTX(ssh_bugs_plainpw1),
+			  sshbug_handler, I(CONF_sshbug_plainpw1));
+	    ctrl_droplist(s, "Chokes on SSH-1 RSA authentication", 'r', 20,
+			  HELPCTX(ssh_bugs_rsa1),
+			  sshbug_handler, I(CONF_sshbug_rsa1));
 	}
     }
 

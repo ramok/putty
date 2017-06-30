@@ -11,6 +11,7 @@
 #include "putty.h"
 #include "storage.h"
 #include "tree234.h"
+#include "winsecur.h"
 
 #define WM_AGENT_CALLBACK (WM_APP + 4)
 
@@ -86,7 +87,6 @@ void cmdline_error(const char *p, ...)
 HANDLE inhandle, outhandle, errhandle;
 struct handle *stdin_handle, *stdout_handle, *stderr_handle;
 DWORD orig_console_mode;
-int connopen;
 
 WSAEVENT netevent;
 
@@ -186,6 +186,8 @@ static void usage(void)
     printf("  -P port   connect to specified port\n");
     printf("  -l user   connect with specified username\n");
     printf("  -batch    disable all interactive prompts\n");
+    printf("  -proxycmd command\n");
+    printf("            use 'command' as local proxy\n");
     printf("  -sercfg configuration-string (e.g. 19200,8,n,1,X)\n");
     printf("            Specify the serial configuration (serial only)\n");
     printf("The following options only apply to SSH connections:\n");
@@ -222,8 +224,10 @@ static void usage(void)
 
 static void version(void)
 {
-    printf("plink: %s\n", ver);
-    exit(1);
+    char *buildinfo_text = buildinfo("\n");
+    printf("plink: %s\n%s\n", ver, buildinfo_text);
+    sfree(buildinfo_text);
+    exit(0);
 }
 
 char *do_select(SOCKET skt, int startup)
@@ -262,7 +266,7 @@ int stdin_gotdata(struct handle *h, void *data, int len)
 	cleanup_exit(0);
     }
     noise_ultralight(len);
-    if (connopen && back->connected(backhandle)) {
+    if (back->connected(backhandle)) {
 	if (len > 0) {
 	    return back->send(backhandle, data, len);
 	} else {
@@ -289,7 +293,7 @@ void stdouterr_sent(struct handle *h, int new_backlog)
 		(h == stdout_handle ? "output" : "error"), buf);
 	cleanup_exit(0);
     }
-    if (connopen && back->connected(backhandle)) {
+    if (back->connected(backhandle)) {
 	back->unthrottle(backhandle, (handle_backlog(stdout_handle) +
 				      handle_backlog(stderr_handle)));
     }
@@ -310,6 +314,8 @@ int main(int argc, char **argv)
     int use_subsystem = 0;
     int just_test_share_exists = FALSE;
     unsigned long now, next, then;
+
+    dll_hijacking_protection();
 
     sklist = NULL;
     skcount = sksize = 0;
@@ -601,6 +607,17 @@ int main(int argc, char **argv)
 	return 1;
     }
 
+    /*
+     * Plink doesn't provide any way to add forwardings after the
+     * connection is set up, so if there are none now, we can safely set
+     * the "simple" flag.
+     */
+    if (conf_get_int(conf, CONF_protocol) == PROT_SSH &&
+	!conf_get_int(conf, CONF_x11_forward) &&
+	!conf_get_int(conf, CONF_agentfwd) &&
+	!conf_get_str_nthstrkey(conf, CONF_portfwd, 0))
+	conf_set_int(conf, CONF_ssh_simple, TRUE);
+
     logctx = log_init(NULL, conf);
     console_provide_logctx(logctx);
 
@@ -615,6 +632,10 @@ int main(int argc, char **argv)
             return 0;
         else
             return 1;
+    }
+
+    if (restricted_acl) {
+	logevent(NULL, "Running with restricted process ACL");
     }
 
     /*
@@ -640,7 +661,6 @@ int main(int argc, char **argv)
 	back->provide_logctx(backhandle, logctx);
 	sfree(realhost);
     }
-    connopen = 1;
 
     inhandle = GetStdHandle(STD_INPUT_HANDLE);
     outhandle = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -707,7 +727,6 @@ int main(int argc, char **argv)
 	    WSANETWORKEVENTS things;
 	    SOCKET socket;
 	    extern SOCKET first_socket(int *), next_socket(int *);
-	    extern int select_result(WPARAM, LPARAM);
 	    int i, socketstate;
 
 	    /*
@@ -760,7 +779,7 @@ int main(int argc, char **argv)
                             LPARAM lp;
                             int err = things.iErrorCode[eventtypes[e].bit];
                             lp = WSAMAKESELECTREPLY(eventtypes[e].mask, err);
-                            connopen &= select_result(wp, lp);
+                            select_result(wp, lp);
                         }
 		}
 	    }
@@ -788,7 +807,7 @@ int main(int argc, char **argv)
 	if (sending)
 	    handle_unthrottle(stdin_handle, back->sendbuffer(backhandle));
 
-	if ((!connopen || !back->connected(backhandle)) &&
+	if (!back->connected(backhandle) &&
 	    handle_backlog(stdout_handle) + handle_backlog(stderr_handle) == 0)
 	    break;		       /* we closed the connection */
     }

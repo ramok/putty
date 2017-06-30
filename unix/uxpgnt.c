@@ -136,13 +136,16 @@ static void usage(void)
     printf("  -D           delete all keys from the agent\n");
     printf("Other options:\n");
     printf("  -v           verbose mode (in agent mode)\n");
+    printf("  -s -c        force POSIX or C shell syntax (in agent mode)\n");
     exit(1);
 }
 
 static void version(void)
 {
-    printf("pageant: %s\n", ver);
-    exit(1);
+    char *buildinfo_text = buildinfo("\n");
+    printf("pageant: %s\n%s\n", ver, buildinfo_text);
+    sfree(buildinfo_text);
+    exit(0);
 }
 
 void keylist_update(void)
@@ -180,24 +183,55 @@ void sshfwd_x11_is_local(struct ssh_channel *c) {}
  */
 static void x11_log(Plug p, int type, SockAddr addr, int port,
 		    const char *error_msg, int error_code) {}
-static int x11_receive(Plug plug, int urgent, char *data, int len) {return 0;}
+static void x11_receive(Plug plug, int urgent, char *data, int len) {}
 static void x11_sent(Plug plug, int bufsize) {}
-static int x11_closing(Plug plug, const char *error_msg, int error_code,
-		       int calling_back)
+static void x11_closing(Plug plug, const char *error_msg, int error_code,
+			int calling_back)
 {
     time_to_die = TRUE;
-    return 1;
 }
 struct X11Connection {
     const struct plug_function_table *fn;
 };
 
 char *socketname;
+static enum { SHELL_AUTO, SHELL_SH, SHELL_CSH } shell_type = SHELL_AUTO;
 void pageant_print_env(int pid)
 {
-    printf("SSH_AUTH_SOCK=%s; export SSH_AUTH_SOCK;\n"
-           "SSH_AGENT_PID=%d; export SSH_AGENT_PID;\n",
-           socketname, (int)pid);
+    if (shell_type == SHELL_AUTO) {
+        /* Same policy as OpenSSH: if $SHELL ends in "csh" then assume
+         * it's csh-shaped. */
+        const char *shell = getenv("SHELL");
+        if (shell && strlen(shell) >= 3 &&
+            !strcmp(shell + strlen(shell) - 3, "csh"))
+            shell_type = SHELL_CSH;
+        else
+            shell_type = SHELL_SH;
+    }
+
+    /*
+     * These shell snippets could usefully pay some attention to
+     * escaping of interesting characters. I don't think it causes a
+     * problem at the moment, because the pathnames we use are so
+     * utterly boring, but it's a lurking bug waiting to happen once
+     * a bit more flexibility turns up.
+     */
+
+    switch (shell_type) {
+      case SHELL_SH:
+        printf("SSH_AUTH_SOCK=%s; export SSH_AUTH_SOCK;\n"
+               "SSH_AGENT_PID=%d; export SSH_AGENT_PID;\n",
+               socketname, pid);
+        break;
+      case SHELL_CSH:
+        printf("setenv SSH_AUTH_SOCK %s;\n"
+               "setenv SSH_AGENT_PID %d;\n",
+               socketname, pid);
+        break;
+      case SHELL_AUTO:
+        assert(0 && "Can't get here");
+        break;
+    }
 }
 
 void pageant_fork_and_print_env(int retain_tty)
@@ -508,18 +542,19 @@ struct pageant_pubkey *find_key(const char *string, char **retstr)
                     filename_free(fn);
                     return NULL;
                 }
+            } else {
+                /*
+                 * If we've successfully loaded the file, stop here - we
+                 * already have a key blob and need not go to the agent to
+                 * list things.
+                 */
+                key_in.ssh_version = 1;
+                key_in.comment = NULL;
+                key_ret = pageant_pubkey_copy(&key_in);
+                sfree(key_in.blob);
+                filename_free(fn);
+                return key_ret;
             }
-
-            /*
-             * If we've successfully loaded the file, stop here - we
-             * already have a key blob and need not go to the agent to
-             * list things.
-             */
-            key_in.ssh_version = 1;
-            key_ret = pageant_pubkey_copy(&key_in);
-            sfree(key_in.blob);
-            filename_free(fn);
-            return key_ret;
         } else if (keytype == SSH_KEYTYPE_SSH2 ||
                    keytype == SSH_KEYTYPE_SSH2_PUBLIC_RFC4716 ||
                    keytype == SSH_KEYTYPE_SSH2_PUBLIC_OPENSSH) {
@@ -534,18 +569,19 @@ struct pageant_pubkey *find_key(const char *string, char **retstr)
                     filename_free(fn);
                     return NULL;
                 }
+            } else {
+                /*
+                 * If we've successfully loaded the file, stop here - we
+                 * already have a key blob and need not go to the agent to
+                 * list things.
+                 */
+                key_in.ssh_version = 2;
+                key_in.comment = NULL;
+                key_ret = pageant_pubkey_copy(&key_in);
+                sfree(key_in.blob);
+                filename_free(fn);
+                return key_ret;
             }
-
-            /*
-             * If we've successfully loaded the file, stop here - we
-             * already have a key blob and need not go to the agent to
-             * list things.
-             */
-            key_in.ssh_version = 2;
-            key_ret = pageant_pubkey_copy(&key_in);
-            sfree(key_in.blob);
-            filename_free(fn);
-            return key_ret;
         } else {
             if (file_errors) {
                 *retstr = dupprintf("unable to load key file '%s': %s",
@@ -943,6 +979,8 @@ void run_agent(void)
         fprintf(stderr, "pageant: %s: %s\n", socketname, strerror(errno));
         exit(1);
     }
+
+    conf_free(conf);
 }
 
 int main(int argc, char **argv)
@@ -967,6 +1005,10 @@ int main(int argc, char **argv)
                 curr_keyact = KEYACT_CLIENT_ADD;
             } else if (!strcmp(p, "-d")) {
                 curr_keyact = KEYACT_CLIENT_DEL;
+            } else if (!strcmp(p, "-s")) {
+                shell_type = SHELL_SH;
+            } else if (!strcmp(p, "-c")) {
+                shell_type = SHELL_CSH;
             } else if (!strcmp(p, "-D")) {
                 add_keyact(KEYACT_CLIENT_DEL_ALL, NULL);
             } else if (!strcmp(p, "-l")) {

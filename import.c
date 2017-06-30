@@ -445,7 +445,7 @@ static struct openssh_pem_key *load_openssh_pem_key(const Filename *filename,
 		if (!strcmp(p, "ENCRYPTED"))
 		    ret->encrypted = TRUE;
 	    } else if (!strcmp(line, "DEK-Info")) {
-		int i, j, ivlen;
+		int i, ivlen;
 
 		if (!strncmp(p, "DES-EDE3-CBC,", 13)) {
 		    ret->encryption = OP_E_3DES;
@@ -459,6 +459,7 @@ static struct openssh_pem_key *load_openssh_pem_key(const Filename *filename,
 		}
 		p = strchr(p, ',') + 1;/* always non-NULL, by above checks */
 		for (i = 0; i < ivlen; i++) {
+                    unsigned j;
 		    if (1 != sscanf(p, "%2x", &j)) {
 			errmsg = "expected more iv data in DEK-Info";
 			goto error;
@@ -1543,18 +1544,14 @@ struct ssh2_userkey *openssh_new_read(const Filename *filename,
                                       const char **errmsg_p)
 {
     struct openssh_new_key *key = load_openssh_new_key(filename, errmsg_p);
-    struct ssh2_userkey *retkey;
+    struct ssh2_userkey *retkey = NULL;
     int i;
     struct ssh2_userkey *retval = NULL;
     const char *errmsg;
-    unsigned char *blob;
-    int blobsize = 0;
     unsigned checkint0, checkint1;
     const void *priv, *string;
     int privlen, stringlen, key_index;
-    const struct ssh_signkey *alg;
-
-    blob = NULL;
+    const struct ssh_signkey *alg = NULL;
 
     if (!key)
 	return NULL;
@@ -1678,10 +1675,10 @@ struct ssh2_userkey *openssh_new_read(const Filename *filename,
                            (const unsigned char *)thiskey);
         if (key_index == key->key_wanted) {
             retkey = snew(struct ssh2_userkey);
+            retkey->comment = NULL;
             retkey->alg = alg;
             retkey->data = alg->openssh_createkey(alg, &thiskey, &thiskeylen);
             if (!retkey->data) {
-                sfree(retkey);
                 errmsg = "unable to create key data structure";
                 goto error;
             }
@@ -1718,11 +1715,16 @@ struct ssh2_userkey *openssh_new_read(const Filename *filename,
 
     errmsg = NULL;                     /* no error */
     retval = retkey;
+    retkey = NULL;                     /* prevent the free */
 
     error:
-    if (blob) {
-        smemclr(blob, blobsize);
-        sfree(blob);
+    if (retkey) {
+        sfree(retkey->comment);
+        if (retkey->data) {
+            assert(alg);
+            alg->freekey(retkey->data);
+        }
+        sfree(retkey);
     }
     smemclr(key->keyblob, key->keyblob_size);
     sfree(key->keyblob);

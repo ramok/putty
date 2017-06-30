@@ -38,6 +38,13 @@ char *dupprintf(const char *fmt, ...)
     ;
 char *dupvprintf(const char *fmt, va_list ap);
 void burnstr(char *string);
+typedef struct strbuf strbuf;
+strbuf *strbuf_new(void);
+void strbuf_free(strbuf *buf);
+char *strbuf_str(strbuf *buf);         /* does not free buf */
+char *strbuf_to_str(strbuf *buf); /* does free buf, but you must free result */
+void strbuf_catf(strbuf *buf, const char *fmt, ...);
+void strbuf_catfv(strbuf *buf, const char *fmt, va_list ap);
 
 /* String-to-Unicode converters that auto-allocate the destination and
  * work around the rather deficient interface of mb_to_wc.
@@ -59,10 +66,14 @@ void base64_encode_atom(const unsigned char *data, int n, char *out);
 int base64_decode_atom(const char *atom, unsigned char *out);
 
 struct bufchain_granule;
-typedef struct bufchain_tag {
+struct bufchain_tag {
     struct bufchain_granule *head, *tail;
     int buffersize;		       /* current amount of buffered data */
-} bufchain;
+};
+#ifndef BUFCHAIN_TYPEDEF
+typedef struct bufchain_tag bufchain;  /* rest of declaration in misc.c */
+#define BUFCHAIN_TYPEDEF
+#endif
 
 void bufchain_init(bufchain *ch);
 void bufchain_clear(bufchain *ch);
@@ -106,6 +117,8 @@ int get_ssh_uint32(int *datalen, const void **data, unsigned *ret);
 /* Given a not-necessarily-zero-terminated string in (length,data)
  * form, check if it equals an ordinary C zero-terminated string. */
 int match_ssh_id(int stringlen, const void *string, const char *id);
+
+char *buildinfo(const char *newline);
 
 /*
  * Debugging functions.
@@ -186,5 +199,10 @@ void debug_memdump(const void *buf, int len, int L);
 #define PUT_16BIT_MSB_FIRST(cp, value) ( \
   (cp)[0] = (unsigned char)((value) >> 8), \
   (cp)[1] = (unsigned char)(value) )
+
+/* Replace NULL with the empty string, permitting an idiom in which we
+ * get a string (pointer,length) pair that might be NULL,0 and can
+ * then safely say things like printf("%.*s", length, NULLTOEMPTY(ptr)) */
+#define NULLTOEMPTY(s) ((s)?(s):"")
 
 #endif

@@ -42,6 +42,18 @@ AS_IF([test "x$setidtype" = "xsetgid"],
 AC_SUBST(SETID_CMD)
 AC_SUBST(SETID_MODE)
 
+AC_ARG_ENABLE([git-commit],
+  [AS_HELP_STRING([--disable-git-commit],
+                  [disable embedding current git HEAD in binaries])],
+  [],
+  [if test -d "$srcdir/.git"; then
+    enable_git_commit=yes; else enable_git_commit=no; fi])
+
+if test "x$enable_git_commit" = "xyes" -a ! -d "$srcdir/.git"; then
+  AC_ERROR([Cannot --enable-git-commit when source tree is not a git checkout])
+fi
+AM_CONDITIONAL(AUTO_GIT_COMMIT, [test "x$enable_git_commit" = "xyes"])
+
 AC_ARG_WITH([gssapi],
   [AS_HELP_STRING([--without-gssapi],
                   [disable GSSAPI support])],
@@ -51,8 +63,11 @@ AC_ARG_WITH([gssapi],
 AC_ARG_WITH([quartz],
   [AS_HELP_STRING([--with-quartz],
                   [build for the MacOS Quartz GTK back end])],
-  [AC_DEFINE([OSX_GTK], [1], [Define if building with GTK for MacOS.])],
-  [])
+  [AC_DEFINE([OSX_GTK], [1], [Define if building with GTK for MacOS.])
+   with_quartz=yes],
+  [with_quartz=no])
+
+AM_CONDITIONAL([HAVE_QUARTZ],[test "x$with_quartz" = "xyes"])
 
 WITH_GSSAPI=
 AS_IF([test "x$with_gssapi" != xno],
