@@ -7,6 +7,11 @@
 #include <stdlib.h>
 #include "putty.h"
 #include "storage.h"
+#ifndef NO_GSSAPI
+#include "sshgssc.h"
+#include "sshgss.h"
+#endif
+
 
 /* The cipher order given here is the default order. */
 static const struct keyvalwhere ciphernames[] = {
@@ -447,6 +452,54 @@ static void wprefs(void *sesskey, const char *name,
     sfree(buf);
 }
 
+static void write_clip_setting(void *handle, const char *savekey,
+                               Conf *conf, int confkey, int strconfkey)
+{
+    int val = conf_get_int(conf, confkey);
+    switch (val) {
+      case CLIPUI_NONE:
+      default:
+        write_setting_s(handle, savekey, "none");
+        break;
+      case CLIPUI_IMPLICIT:
+        write_setting_s(handle, savekey, "implicit");
+        break;
+      case CLIPUI_EXPLICIT:
+        write_setting_s(handle, savekey, "explicit");
+        break;
+      case CLIPUI_CUSTOM:
+        {
+            char *sval = dupcat("custom:", conf_get_str(conf, strconfkey),
+                                (const char *)NULL);
+            write_setting_s(handle, savekey, sval);
+            sfree(sval);
+        }
+        break;
+    }
+}
+
+static void read_clip_setting(void *handle, const char *savekey,
+                              int def, Conf *conf, int confkey, int strconfkey)
+{
+    char *setting = read_setting_s(handle, savekey);
+    int val;
+
+    conf_set_str(conf, strconfkey, "");
+    if (!setting) {
+        val = def;
+    } else if (!strcmp(setting, "implicit")) {
+        val = CLIPUI_IMPLICIT;
+    } else if (!strcmp(setting, "explicit")) {
+        val = CLIPUI_EXPLICIT;
+    } else if (!strncmp(setting, "custom:", 7)) {
+        val = CLIPUI_CUSTOM;
+        conf_set_str(conf, strconfkey, setting + 7);
+    } else {
+        val = CLIPUI_NONE;
+    }
+    conf_set_int(conf, confkey, val);
+}
+
 char *save_settings(const char *section, Conf *conf)
 {
     void *sesskey;
@@ -521,12 +574,14 @@ void save_open_settings(void *sesskey, Conf *conf)
     wprefs(sesskey, "KEX", kexnames, KEX_MAX, conf, CONF_ssh_kexlist);
     wprefs(sesskey, "HostKey", hknames, HK_MAX, conf, CONF_ssh_hklist);
     write_setting_i(sesskey, "RekeyTime", conf_get_int(conf, CONF_ssh_rekey_time));
+    write_setting_i(sesskey, "GssapiRekey", conf_get_int(conf, CONF_gssapirekey));
     write_setting_s(sesskey, "RekeyBytes", conf_get_str(conf, CONF_ssh_rekey_data));
     write_setting_i(sesskey, "SshNoAuth", conf_get_int(conf, CONF_ssh_no_userauth));
     write_setting_i(sesskey, "SshBanner", conf_get_int(conf, CONF_ssh_show_banner));
     write_setting_i(sesskey, "AuthTIS", conf_get_int(conf, CONF_try_tis_auth));
     write_setting_i(sesskey, "AuthKI", conf_get_int(conf, CONF_try_ki_auth));
     write_setting_i(sesskey, "AuthGSSAPI", conf_get_int(conf, CONF_try_gssapi_auth));
+    write_setting_i(sesskey, "AuthGSSAPIKEX", conf_get_int(conf, CONF_try_gssapi_kex));
 #ifndef NO_GSSAPI
     wprefs(sesskey, "GSSLibs", gsslibkeywords, ngsslibs, conf, CONF_ssh_gsslist);
     write_setting_filename(sesskey, "GSSCustom", conf_get_filename(conf, CONF_ssh_gss_custom));
@@ -610,6 +665,7 @@ void save_open_settings(void *sesskey, Conf *conf)
     write_setting_i(sesskey, "TryPalette", conf_get_int(conf, CONF_try_palette));
     write_setting_i(sesskey, "ANSIColour", conf_get_int(conf, CONF_ansi_colour));
     write_setting_i(sesskey, "Xterm256Colour", conf_get_int(conf, CONF_xterm_256_colour));
+    write_setting_i(sesskey, "TrueColour", conf_get_int(conf, CONF_true_colour));
     write_setting_i(sesskey, "BoldAsColour", conf_get_int(conf, CONF_bold_style)-1);
 
     for (i = 0; i < 22; i++) {
@@ -622,9 +678,11 @@ void save_open_settings(void *sesskey, Conf *conf)
 	write_setting_s(sesskey, buf, buf2);
     }
     write_setting_i(sesskey, "RawCNP", conf_get_int(conf, CONF_rawcnp));
+    write_setting_i(sesskey, "UTF8linedraw", conf_get_int(conf, CONF_utf8linedraw));
     write_setting_i(sesskey, "PasteRTF", conf_get_int(conf, CONF_rtf_paste));
     write_setting_i(sesskey, "MouseIsXterm", conf_get_int(conf, CONF_mouse_is_xterm));
     write_setting_i(sesskey, "RectSelect", conf_get_int(conf, CONF_rect_select));
+    write_setting_i(sesskey, "PasteControls", conf_get_int(conf, CONF_paste_controls));
     write_setting_i(sesskey, "MouseOverride", conf_get_int(conf, CONF_mouse_override));
     for (i = 0; i < 256; i += 32) {
 	char buf[20], buf2[256];
@@ -638,6 +696,14 @@ void save_open_settings(void *sesskey, Conf *conf)
 	}
 	write_setting_s(sesskey, buf, buf2);
     }
+    write_setting_i(sesskey, "MouseAutocopy",
+                    conf_get_int(conf, CONF_mouseautocopy));
+    write_clip_setting(sesskey, "MousePaste", conf,
+                       CONF_mousepaste, CONF_mousepaste_custom);
+    write_clip_setting(sesskey, "CtrlShiftIns", conf,
+                       CONF_ctrlshiftins, CONF_ctrlshiftins_custom);
+    write_clip_setting(sesskey, "CtrlShiftCV", conf,
+                       CONF_ctrlshiftcv, CONF_ctrlshiftcv_custom);
     write_setting_s(sesskey, "LineCodePage", conf_get_str(conf, CONF_line_codepage));
     write_setting_i(sesskey, "CJKAmbigWide", conf_get_int(conf, CONF_cjk_ambig_wide));
     write_setting_i(sesskey, "UTF8Override", conf_get_int(conf, CONF_utf8_override));
@@ -853,7 +919,7 @@ void load_open_settings(void *sesskey, Conf *conf)
 	 * a server which offered it then choked, but we never got
 	 * a server version string or any other reports. */
 	const char *default_kexes,
-	           *normal_default = "ecdh,dh-gex-sha1,dh-group14-sha1,rsa,"
+		   *normal_default = "ecdh,dh-gex-sha1,dh-group14-sha1,rsa,"
 		       "WARN,dh-group1-sha1",
 		   *bugdhgex2_default = "ecdh,dh-group14-sha1,rsa,"
 		       "WARN,dh-group1-sha1,dh-gex-sha1";
@@ -883,12 +949,20 @@ void load_open_settings(void *sesskey, Conf *conf)
 	    sfree(raw);
 	    raw = dupstr(normal_default);
 	}
-	gprefs_from_str(raw, kexnames, KEX_MAX, conf, CONF_ssh_kexlist);
+	/* (For the record: after 0.70, the default algorithm list
+	 * very briefly contained the string 'gss-sha1-krb5'; this was
+	 * never used in any committed version of code, but was left
+	 * over from a pre-commit version of GSS key exchange.
+	 * Mentioned here as it is remotely possible that it will turn
+	 * up in someone's saved settings in future.) */
+
+        gprefs_from_str(raw, kexnames, KEX_MAX, conf, CONF_ssh_kexlist);
 	sfree(raw);
     }
     gprefs(sesskey, "HostKey", "ed25519,ecdsa,rsa,dsa,WARN",
            hknames, HK_MAX, conf, CONF_ssh_hklist);
     gppi(sesskey, "RekeyTime", 60, conf, CONF_ssh_rekey_time);
+    gppi(sesskey, "GssapiRekey", GSS_DEF_REKEY_MINS, conf, CONF_gssapirekey);
     gpps(sesskey, "RekeyBytes", "1G", conf, CONF_ssh_rekey_data);
     {
 	/* SSH-2 only by default */
@@ -906,6 +980,7 @@ void load_open_settings(void *sesskey, Conf *conf)
     gppi(sesskey, "AuthTIS", 0, conf, CONF_try_tis_auth);
     gppi(sesskey, "AuthKI", 1, conf, CONF_try_ki_auth);
     gppi(sesskey, "AuthGSSAPI", 1, conf, CONF_try_gssapi_auth);
+    gppi(sesskey, "AuthGSSAPIKEX", 1, conf, CONF_try_gssapi_kex);
 #ifndef NO_GSSAPI
     gprefs(sesskey, "GSSLibs", "\0",
 	   gsslibkeywords, ngsslibs, conf, CONF_ssh_gsslist);
@@ -1007,6 +1082,7 @@ void load_open_settings(void *sesskey, Conf *conf)
     gppi(sesskey, "TryPalette", 0, conf, CONF_try_palette);
     gppi(sesskey, "ANSIColour", 1, conf, CONF_ansi_colour);
     gppi(sesskey, "Xterm256Colour", 1, conf, CONF_xterm_256_colour);
+    gppi(sesskey, "TrueColour", 1, conf, CONF_true_colour);
     i = gppi_raw(sesskey, "BoldAsColour", 1); conf_set_int(conf, CONF_bold_style, i+1);
 
     for (i = 0; i < 22; i++) {
@@ -1029,9 +1105,11 @@ void load_open_settings(void *sesskey, Conf *conf)
 	sfree(buf2);
     }
     gppi(sesskey, "RawCNP", 0, conf, CONF_rawcnp);
+    gppi(sesskey, "UTF8linedraw", 0, conf, CONF_utf8linedraw);
     gppi(sesskey, "PasteRTF", 0, conf, CONF_rtf_paste);
     gppi(sesskey, "MouseIsXterm", 0, conf, CONF_mouse_is_xterm);
     gppi(sesskey, "RectSelect", 0, conf, CONF_rect_select);
+    gppi(sesskey, "PasteControls", 0, conf, CONF_paste_controls);
     gppi(sesskey, "MouseOverride", 1, conf, CONF_mouse_override);
     for (i = 0; i < 256; i += 32) {
 	static const char *const defaults[] = {
@@ -1059,6 +1137,14 @@ void load_open_settings(void *sesskey, Conf *conf)
 	}
 	sfree(buf2);
     }
+    gppi(sesskey, "MouseAutocopy", CLIPUI_DEFAULT_AUTOCOPY,
+         conf, CONF_mouseautocopy);
+    read_clip_setting(sesskey, "MousePaste", CLIPUI_DEFAULT_MOUSE,
+                      conf, CONF_mousepaste, CONF_mousepaste_custom);
+    read_clip_setting(sesskey, "CtrlShiftIns", CLIPUI_DEFAULT_INS,
+                      conf, CONF_ctrlshiftins, CONF_ctrlshiftins_custom);
+    read_clip_setting(sesskey, "CtrlShiftCV", CLIPUI_NONE,
+                      conf, CONF_ctrlshiftcv, CONF_ctrlshiftcv_custom);
     /*
      * The empty default for LineCodePage will be converted later
      * into a plausible default for the locale.

@@ -91,21 +91,6 @@ static void tell_user(FILE *stream, const char *fmt, ...)
 /*
  *  Print an error message and perform a fatal exit.
  */
-void fatalbox(const char *fmt, ...)
-{
-    char *str, *str2;
-    va_list ap;
-    va_start(ap, fmt);
-    str = dupvprintf(fmt, ap);
-    str2 = dupcat("Fatal: ", str, "\n", NULL);
-    sfree(str);
-    va_end(ap);
-    tell_str(stderr, str2);
-    sfree(str2);
-    errs++;
-
-    cleanup_exit(1);
-}
 void modalfatalbox(const char *fmt, ...)
 {
     char *str, *str2;
@@ -173,7 +158,7 @@ static unsigned char *outptr;	       /* where to put the data */
 static unsigned outlen;		       /* how much data required */
 static unsigned char *pending = NULL;  /* any spare data */
 static unsigned pendlen = 0, pendsize = 0;	/* length and phys. size of buffer */
-int from_backend(void *frontend, int is_stderr, const char *data, int datalen)
+int from_backend(void *frontend, int is_stderr, const void *data, int datalen)
 {
     unsigned char *p = (unsigned char *) data;
     unsigned len = (unsigned) datalen;
@@ -211,7 +196,7 @@ int from_backend(void *frontend, int is_stderr, const char *data, int datalen)
 
     return 0;
 }
-int from_backend_untrusted(void *frontend_handle, const char *data, int len)
+int from_backend_untrusted(void *frontend_handle, const void *data, int len)
 {
     /*
      * No "untrusted" output should get here (the way the code is
@@ -234,7 +219,7 @@ int from_backend_eof(void *frontend)
     }
     return FALSE;
 }
-static int ssh_scp_recv(unsigned char *buf, int len)
+static int ssh_scp_recv(void *buf, int len)
 {
     outptr = buf;
     outlen = len;
@@ -319,7 +304,7 @@ static void bump(const char *fmt, ...)
 	char ch;
 	back->special(backhandle, TS_EOF);
         sent_eof = TRUE;
-	ssh_scp_recv((unsigned char *) &ch, 1);
+	ssh_scp_recv(&ch, 1);
     }
 
     cleanup_exit(1);
@@ -626,7 +611,7 @@ static int response(void)
     char ch, resp, rbuf[2048];
     int p;
 
-    if (ssh_scp_recv((unsigned char *) &resp, 1) <= 0)
+    if (ssh_scp_recv(&resp, 1) <= 0)
 	bump("Lost connection");
 
     p = 0;
@@ -639,7 +624,7 @@ static int response(void)
       case 1:			       /* error */
       case 2:			       /* fatal error */
 	do {
-	    if (ssh_scp_recv((unsigned char *) &ch, 1) <= 0)
+	    if (ssh_scp_recv(&ch, 1) <= 0)
 		bump("Protocol error: Lost connection");
 	    rbuf[p++] = ch;
 	} while (p < sizeof(rbuf) && ch != '\n');
@@ -655,7 +640,7 @@ static int response(void)
 
 int sftp_recvdata(char *buf, int len)
 {
-    return ssh_scp_recv((unsigned char *) buf, len);
+    return ssh_scp_recv(buf, len);
 }
 int sftp_senddata(char *buf, int len)
 {
@@ -1448,14 +1433,14 @@ int scp_get_sink_action(struct scp_sink_action *act)
 	bufsize = 0;
 
 	while (!done) {
-	    if (ssh_scp_recv((unsigned char *) &ch, 1) <= 0)
+	    if (ssh_scp_recv(&ch, 1) <= 0)
 		return 1;
 	    if (ch == '\n')
 		bump("Protocol error: Unexpected newline");
 	    i = 0;
 	    action = ch;
 	    do {
-		if (ssh_scp_recv((unsigned char *) &ch, 1) <= 0)
+		if (ssh_scp_recv(&ch, 1) <= 0)
 		    bump("Lost connection");
 		if (i >= bufsize) {
 		    bufsize = i + 128;
@@ -1582,7 +1567,7 @@ int scp_recv_filedata(char *data, int len)
 
 	return actuallen;
     } else {
-	return ssh_scp_recv((unsigned char *) data, len);
+	return ssh_scp_recv(data, len);
     }
 }
 
@@ -2219,7 +2204,7 @@ static void get_dir_list(int argc, char *argv[])
     if (using_sftp) {
 	scp_sftp_listdir(src);
     } else {
-	while (ssh_scp_recv((unsigned char *) &c, 1) > 0)
+	while (ssh_scp_recv(&c, 1) > 0)
 	    tell_char(stdout, c);
     }
 }
@@ -2394,7 +2379,7 @@ int psftp_main(int argc, char *argv[])
 	char ch;
 	back->special(backhandle, TS_EOF);
         sent_eof = TRUE;
-	ssh_scp_recv((unsigned char *) &ch, 1);
+	ssh_scp_recv(&ch, 1);
     }
     random_save_seed();
 

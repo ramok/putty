@@ -26,9 +26,6 @@ void cleanup_exit(int code)
     sk_cleanup();
 
     random_save_seed();
-#ifdef MSCRYPTOAPI
-    crypto_wrapup();
-#endif
 
     exit(code);
 }
@@ -355,10 +352,9 @@ static void console_data_untrusted(HANDLE hout, const char *data, int len)
     WriteFile(hout, data, len, &dummy, NULL);
 }
 
-int console_get_userpass_input(prompts_t *p,
-                               const unsigned char *in, int inlen)
+int console_get_userpass_input(prompts_t *p)
 {
-    HANDLE hin, hout;
+    HANDLE hin = INVALID_HANDLE_VALUE, hout = INVALID_HANDLE_VALUE;
     size_t curr_prompt;
 
     /*

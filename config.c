@@ -442,7 +442,7 @@ static void kexlist_handler(union control *ctrl, void *dlg,
 	/* (kexlist assumed to contain all algorithms) */
 	dlg_update_start(ctrl, dlg);
 	dlg_listbox_clear(ctrl, dlg);
-	for (i = 0; i < KEX_MAX; i++) {
+        for (i = 0; i < KEX_MAX; i++) {
 	    int k = conf_get_int_int(conf, CONF_ssh_kexlist, i);
 	    int j;
 	    const char *kstr = NULL;
@@ -460,7 +460,7 @@ static void kexlist_handler(union control *ctrl, void *dlg,
 	int i;
 
 	/* Update array to match the list box. */
-	for (i=0; i < KEX_MAX; i++)
+        for (i=0; i < KEX_MAX; i++)
 	    conf_set_int_int(conf, CONF_ssh_kexlist, i,
 			     dlg_listbox_getid(ctrl, dlg, i));
     }
@@ -1227,7 +1227,7 @@ static void portfwd_handler(union control *ctrl, void *dlg,
 		if (key) {
 		    static const char *const afs = "A46";
 		    static const char *const dirs = "LRD";
-		    char *afp;
+		    const char *afp;
 		    int dir;
 #ifndef NO_IPV6
 		    int idx;
@@ -1335,6 +1335,105 @@ static void manual_hostkey_handler(union control *ctrl, void *dlg,
 	    dlg_refresh(mh->listbox, dlg);
 	}
     }
+}
+
+static void clipboard_selector_handler(union control *ctrl, void *dlg,
+                                       void *data, int event)
+{
+    Conf *conf = (Conf *)data;
+    int setting = ctrl->generic.context.i;
+#ifdef NAMED_CLIPBOARDS
+    int strsetting = ctrl->editbox.context2.i;
+#endif
+
+    static const struct {
+        const char *name;
+        int id;
+    } options[] = {
+        {"No action", CLIPUI_NONE},
+        {CLIPNAME_IMPLICIT, CLIPUI_IMPLICIT},
+        {CLIPNAME_EXPLICIT, CLIPUI_EXPLICIT},
+    };
+
+    if (event == EVENT_REFRESH) {
+        int i, val = conf_get_int(conf, setting);
+
+        dlg_update_start(ctrl, dlg);
+        dlg_listbox_clear(ctrl, dlg);
+
+#ifdef NAMED_CLIPBOARDS
+        for (i = 0; i < lenof(options); i++)
+            dlg_listbox_add(ctrl, dlg, options[i].name);
+        if (val == CLIPUI_CUSTOM) {
+            const char *sval = conf_get_str(conf, strsetting);
+            for (i = 0; i < lenof(options); i++)
+                if (!strcmp(sval, options[i].name))
+                    break;             /* needs escaping */
+            if (i < lenof(options) || sval[0] == '=') {
+                char *escaped = dupcat("=", sval, (const char *)NULL);
+                dlg_editbox_set(ctrl, dlg, escaped);
+                sfree(escaped);
+            } else {
+                dlg_editbox_set(ctrl, dlg, sval);
+            }
+        } else {
+            dlg_editbox_set(ctrl, dlg, options[0].name); /* fallback */
+            for (i = 0; i < lenof(options); i++)
+                if (val == options[i].id)
+                    dlg_editbox_set(ctrl, dlg, options[i].name);
+        }
+#else
+        for (i = 0; i < lenof(options); i++)
+            dlg_listbox_addwithid(ctrl, dlg, options[i].name, options[i].id);
+        dlg_listbox_select(ctrl, dlg, 0); /* fallback */
+        for (i = 0; i < lenof(options); i++)
+            if (val == options[i].id)
+                dlg_listbox_select(ctrl, dlg, i);
+#endif
+	dlg_update_done(ctrl, dlg);
+    } else if (event == EVENT_SELCHANGE
+#ifdef NAMED_CLIPBOARDS
+               || event == EVENT_VALCHANGE
+#endif
+        ) {
+#ifdef NAMED_CLIPBOARDS
+        const char *sval = dlg_editbox_get(ctrl, dlg);
+        int i;
+
+        for (i = 0; i < lenof(options); i++)
+            if (!strcmp(sval, options[i].name)) {
+                conf_set_int(conf, setting, options[i].id);
+                conf_set_str(conf, strsetting, "");
+                break;
+            }
+        if (i == lenof(options)) {
+            conf_set_int(conf, setting, CLIPUI_CUSTOM);
+            if (sval[0] == '=')
+                sval++;
+            conf_set_str(conf, strsetting, sval);
+        }
+#else
+        int index = dlg_listbox_index(ctrl, dlg);
+        if (index >= 0) {
+            int val = dlg_listbox_getid(ctrl, dlg, index);
+            conf_set_int(conf, setting, val);
+        }
+#endif
+    }
+}
+
+static void clipboard_control(struct controlset *s, const char *label,
+                              char shortcut, int percentage, intorptr helpctx,
+                              int setting, int strsetting)
+{
+#ifdef NAMED_CLIPBOARDS
+    ctrl_combobox(s, label, shortcut, percentage, helpctx,
+                  clipboard_selector_handler, I(setting), I(strsetting));
+#else
+    /* strsetting isn't needed in this case */
+    ctrl_droplist(s, label, shortcut, percentage, helpctx,
+                  clipboard_selector_handler, I(setting));
+#endif
 }
 
 void setup_config_box(struct controlbox *b, int midsession,
@@ -1840,6 +1939,9 @@ void setup_config_box(struct controlbox *b, int midsession,
     ctrl_checkbox(s, "Copy and paste line drawing characters as lqqqk",'d',
 		  HELPCTX(selection_linedraw),
 		  conf_checkbox_handler, I(CONF_rawcnp));
+    ctrl_checkbox(s, "Enable VT100 line drawing even in UTF-8 mode",'8',
+                  HELPCTX(translation_utf8linedraw),
+                  conf_checkbox_handler, I(CONF_utf8linedraw));
 
     /*
      * The Window/Selection panel.
@@ -1860,12 +1962,40 @@ void setup_config_box(struct controlbox *b, int midsession,
 		      "Normal", 'n', I(0),
 		      "Rectangular block", 'r', I(1), NULL);
 
-    s = ctrl_getset(b, "Window/Selection", "charclass",
-		    "Control the select-one-word-at-a-time mode");
+    s = ctrl_getset(b, "Window/Selection", "clipboards",
+                    "Assign copy/paste actions to clipboards");
+    ctrl_checkbox(s, "Auto-copy selected text to "
+                  CLIPNAME_EXPLICIT_OBJECT,
+                  NO_SHORTCUT, HELPCTX(selection_autocopy),
+                  conf_checkbox_handler, I(CONF_mouseautocopy));
+    clipboard_control(s, "Mouse paste action:", NO_SHORTCUT, 60,
+                      HELPCTX(selection_clipactions),
+                      CONF_mousepaste, CONF_mousepaste_custom);
+    clipboard_control(s, "{Ctrl,Shift} + Ins:", NO_SHORTCUT, 60,
+                      HELPCTX(selection_clipactions),
+                      CONF_ctrlshiftins, CONF_ctrlshiftins_custom);
+    clipboard_control(s, "Ctrl + Shift + {C,V}:", NO_SHORTCUT, 60,
+                      HELPCTX(selection_clipactions),
+                      CONF_ctrlshiftcv, CONF_ctrlshiftcv_custom);
+
+    s = ctrl_getset(b, "Window/Selection", "paste",
+                    "Control pasting of text from clipboard to terminal");
+    ctrl_checkbox(s, "Permit control characters in pasted text",
+                  NO_SHORTCUT, HELPCTX(selection_pastectrl),
+                  conf_checkbox_handler, I(CONF_paste_controls));
+
+    /*
+     * The Window/Selection/Copy panel.
+     */
+    ctrl_settitle(b, "Window/Selection/Copy",
+                  "Options controlling copying from terminal to clipboard");
+
+    s = ctrl_getset(b, "Window/Selection/Copy", "charclass",
+		    "Classes of character that group together");
     ccd = (struct charclass_data *)
 	ctrl_alloc(b, sizeof(struct charclass_data));
     ccd->listbox = ctrl_listbox(s, "Character classes:", 'e',
-				HELPCTX(selection_charclasses),
+				HELPCTX(copy_charclasses),
 				charclass_handler, P(ccd));
     ccd->listbox->listbox.multisel = 1;
     ccd->listbox->listbox.ncols = 4;
@@ -1876,11 +2006,11 @@ void setup_config_box(struct controlbox *b, int midsession,
     ccd->listbox->listbox.percentages[3] = 40;
     ctrl_columns(s, 2, 67, 33);
     ccd->editbox = ctrl_editbox(s, "Set to class", 't', 50,
-				HELPCTX(selection_charclasses),
+				HELPCTX(copy_charclasses),
 				charclass_handler, P(ccd), P(NULL));
     ccd->editbox->generic.column = 0;
     ccd->button = ctrl_pushbutton(s, "Set", 's',
-				  HELPCTX(selection_charclasses),
+				  HELPCTX(copy_charclasses),
 				  charclass_handler, P(ccd));
     ccd->button->generic.column = 1;
     ctrl_columns(s, 1, 100);
@@ -1898,6 +2028,9 @@ void setup_config_box(struct controlbox *b, int midsession,
     ctrl_checkbox(s, "Allow terminal to use xterm 256-colour mode", '2',
 		  HELPCTX(colours_xterm256), conf_checkbox_handler,
 		  I(CONF_xterm_256_colour));
+    ctrl_checkbox(s, "Allow terminal to use 24-bit colours", '4',
+		  HELPCTX(colours_truecolour), conf_checkbox_handler,
+		  I(CONF_true_colour));
     ctrl_radiobuttons(s, "Indicate bolded text by changing:", 'b', 3,
                       HELPCTX(colours_bold),
                       conf_radiobutton_handler, I(CONF_bold_style),
@@ -2272,7 +2405,11 @@ void setup_config_box(struct controlbox *b, int midsession,
 	    c = ctrl_draglist(s, "Algorithm selection policy:", 's',
 			      HELPCTX(ssh_kexlist),
 			      kexlist_handler, P(NULL));
-	    c->listbox.height = 5;
+            c->listbox.height = KEX_MAX;
+	    ctrl_checkbox(s, "Attempt GSSAPI key exchange",
+			  'k', HELPCTX(ssh_gssapi),
+			  conf_checkbox_handler,
+			  I(CONF_try_gssapi_kex));
 
 	    s = ctrl_getset(b, "Connection/SSH/Kex", "repeat",
 			    "Options controlling key re-exchange");
@@ -2282,6 +2419,11 @@ void setup_config_box(struct controlbox *b, int midsession,
 			 conf_editbox_handler,
 			 I(CONF_ssh_rekey_time),
 			 I(-1));
+            ctrl_editbox(s, "Minutes between GSS checks (0 for never)", NO_SHORTCUT, 20,
+                         HELPCTX(ssh_kex_repeat),
+                         conf_editbox_handler,
+                         I(CONF_gssapirekey),
+                         I(-1));
 	    ctrl_editbox(s, "Max data before rekey (0 for no limit)", 'x', 20,
 			 HELPCTX(ssh_kex_repeat),
 			 conf_editbox_handler,
@@ -2429,6 +2571,11 @@ void setup_config_box(struct controlbox *b, int midsession,
 			  't', HELPCTX(ssh_gssapi),
 			  conf_checkbox_handler,
 			  I(CONF_try_gssapi_auth));
+
+	    ctrl_checkbox(s, "Attempt GSSAPI key exchange (SSH-2 only)",
+			  'k', HELPCTX(ssh_gssapi),
+			  conf_checkbox_handler,
+			  I(CONF_try_gssapi_kex));
 
 	    ctrl_checkbox(s, "Allow GSSAPI credential delegation", 'l',
 			  HELPCTX(ssh_gssapi_delegation),

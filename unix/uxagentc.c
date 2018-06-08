@@ -95,6 +95,8 @@ void agent_cancel_query(agent_pending_query *conn)
     uxsel_del(conn->fd);
     close(conn->fd);
     del234(agent_pending_queries, conn);
+    if (conn->retbuf && conn->retbuf != conn->sizebuf)
+        sfree(conn->retbuf);
     sfree(conn);
 }
 
@@ -114,16 +116,17 @@ static void agent_select_result(int fd, int event)
 	return;		       /* more data to come */
 
     /*
-     * We have now completed the agent query. Do the callback, and
-     * clean up. (Of course we don't free retbuf, since ownership
-     * of that passes to the callback.)
+     * We have now completed the agent query. Do the callback.
      */
     conn->callback(conn->callback_ctx, conn->retbuf, conn->retlen);
+    /* Null out conn->retbuf, since ownership of that buffer has
+     * passed to the callback. */
+    conn->retbuf = NULL;
     agent_cancel_query(conn);
 }
 
 agent_pending_query *agent_query(
-    void *in, int inlen, void **out, int *outlen,
+    strbuf *query, void **out, int *outlen,
     void (*callback)(void *, void *, int), void *callback_ctx)
 {
     char *name;
@@ -151,8 +154,11 @@ agent_pending_query *agent_query(
 	goto failure;
     }
 
-    for (done = 0; done < inlen ;) {
-	int ret = write(sock, (char *)in + done, inlen - done);
+    strbuf_finalise_agent_query(query);
+
+    for (done = 0; done < query->len ;) {
+	int ret = write(sock, query->s + done,
+                        query->len - done);
 	if (ret <= 0) {
 	    close(sock);
 	    goto failure;

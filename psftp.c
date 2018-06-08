@@ -2442,20 +2442,6 @@ static int verbose = 0;
 /*
  *  Print an error message and perform a fatal exit.
  */
-void fatalbox(const char *fmt, ...)
-{
-    char *str, *str2;
-    va_list ap;
-    va_start(ap, fmt);
-    str = dupvprintf(fmt, ap);
-    str2 = dupcat("Fatal: ", str, "\n", NULL);
-    sfree(str);
-    va_end(ap);
-    fputs(str2, stderr);
-    sfree(str2);
-
-    cleanup_exit(1);
-}
 void modalfatalbox(const char *fmt, ...)
 {
     char *str, *str2;
@@ -2522,7 +2508,7 @@ static unsigned char *outptr;	       /* where to put the data */
 static unsigned outlen;		       /* how much data required */
 static unsigned char *pending = NULL;  /* any spare data */
 static unsigned pendlen = 0, pendsize = 0;	/* length and phys. size of buffer */
-int from_backend(void *frontend, int is_stderr, const char *data, int datalen)
+int from_backend(void *frontend, int is_stderr, const void *data, int datalen)
 {
     unsigned char *p = (unsigned char *) data;
     unsigned len = (unsigned) datalen;
@@ -2566,7 +2552,7 @@ int from_backend(void *frontend, int is_stderr, const char *data, int datalen)
 
     return 0;
 }
-int from_backend_untrusted(void *frontend_handle, const char *data, int len)
+int from_backend_untrusted(void *frontend_handle, const void *data, int len)
 {
     /*
      * No "untrusted" output should get here (the way the code is

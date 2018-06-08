@@ -57,6 +57,7 @@ static HMENU systray_menu, session_menu;
 static int already_running;
 
 static char *putty_path;
+static int restrict_putty_acl = FALSE;
 
 /* CWD for "add key" file requester. */
 static filereq *keypath = NULL;
@@ -289,14 +290,16 @@ void keylist_update(void)
     if (keylist) {
 	SendDlgItemMessage(keylist, 100, LB_RESETCONTENT, 0, 0);
 	for (i = 0; NULL != (rkey = pageant_nth_ssh1_key(i)); i++) {
-	    char listentry[512], *p;
+	    char *listentry, *fp, *p;
+
+	    fp = rsa_ssh1_fingerprint(rkey);
+	    listentry = dupprintf("ssh1\t%s", fp);
+            sfree(fp);
+
 	    /*
 	     * Replace two spaces in the fingerprint with tabs, for
 	     * nice alignment in the box.
 	     */
-	    strcpy(listentry, "ssh1\t");
-	    p = listentry + strlen(listentry);
-	    rsa_fingerprint(p, sizeof(listentry) - (p - listentry), rkey);
 	    p = strchr(listentry, ' ');
 	    if (p)
 		*p = '\t';
@@ -305,6 +308,7 @@ void keylist_update(void)
 		*p = '\t';
 	    SendDlgItemMessage(keylist, 100, LB_ADDSTRING,
 			       0, (LPARAM) listentry);
+            sfree(listentry);
 	}
 	for (i = 0; NULL != (skey = pageant_nth_ssh2_key(i)); i++) {
 	    char *listentry, *p;
@@ -335,7 +339,7 @@ void keylist_update(void)
              * stop and leave out a tab character. Urgh.
              */
 
-	    p = ssh2_fingerprint(skey->alg, skey->data);
+	    p = ssh2_fingerprint(skey->key);
             listentry = dupprintf("%s\t%s", p, skey->comment);
             sfree(p);
 
@@ -346,7 +350,8 @@ void keylist_update(void)
                     break;
                 listentry[pos++] = '\t';
             }
-            if (skey->alg != &ssh_dss && skey->alg != &ssh_rsa) {
+            if (ssh_key_alg(skey->key) != &ssh_dss &&
+                ssh_key_alg(skey->key) != &ssh_rsa) {
                 /*
                  * Remove the bit-count field, which is between the
                  * first and second \t.
@@ -375,22 +380,46 @@ void keylist_update(void)
     }
 }
 
+struct PageantReply {
+    char buf[AGENT_MAX_MSGLEN - 4];
+    int len, overflowed;
+    BinarySink_IMPLEMENTATION;
+};
+
+static void pageant_reply_BinarySink_write(
+    BinarySink *bs, const void *data, size_t len)
+{
+    struct PageantReply *rep = BinarySink_DOWNCAST(bs, struct PageantReply);
+    if (!rep->overflowed && len <= sizeof(rep->buf) - rep->len) {
+        memcpy(rep->buf + rep->len, data, len);
+        rep->len += len;
+    } else {
+        rep->overflowed = TRUE;
+    }
+}
+
 static void answer_msg(void *msgv)
 {
     unsigned char *msg = (unsigned char *)msgv;
     unsigned msglen;
-    void *reply;
-    int replylen;
+    struct PageantReply reply;
+
+    reply.len = 0;
+    reply.overflowed = FALSE;
+    BinarySink_INIT(&reply, pageant_reply_BinarySink_write);
 
     msglen = GET_32BIT(msg);
     if (msglen > AGENT_MAX_MSGLEN) {
-        reply = pageant_failure_msg(&replylen);
+        pageant_failure_msg(BinarySink_UPCAST(&reply),
+                            "incoming length field too large", NULL, NULL);
     } else {
-        reply = pageant_handle_msg(msg + 4, msglen, &replylen, NULL, NULL);
-        if (replylen > AGENT_MAX_MSGLEN) {
-            smemclr(reply, replylen);
-            sfree(reply);
-            reply = pageant_failure_msg(&replylen);
+        pageant_handle_msg(BinarySink_UPCAST(&reply),
+                           msg + 4, msglen, NULL, NULL);
+        if (reply.len > AGENT_MAX_MSGLEN) {
+            reply.len = 0;
+            reply.overflowed = FALSE;
+            pageant_failure_msg(BinarySink_UPCAST(&reply),
+                                "output would exceed max msglen", NULL, NULL);
         }
     }
 
@@ -398,9 +427,10 @@ static void answer_msg(void *msgv)
      * Windows Pageant answers messages in place, by overwriting the
      * input message buffer.
      */
-    memcpy(msg, reply, replylen);
-    smemclr(reply, replylen);
-    sfree(reply);
+    assert(4 + reply.len <= AGENT_MAX_MSGLEN);
+    PUT_32BIT(msg, reply.len);
+    memcpy(msg + 4, reply.buf, reply.len);
+    smemclr(reply.buf, sizeof(reply.buf));
 }
 
 static void win_add_keyfile(Filename *filename)
@@ -618,7 +648,7 @@ static INT_PTR CALLBACK KeyListProc(HWND hwnd, UINT msg,
 			
                     if (selectedArray[itemNum] == rCount + i) {
                         pageant_delete_ssh2_key(skey);
-                        skey->alg->freekey(skey->data);
+                        ssh_key_free(skey->key);
                         sfree(skey);
                         itemNum--;
                     }
@@ -847,11 +877,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT message,
       case WM_SYSCOMMAND:
 	switch (wParam & ~0xF) {       /* low 4 bits reserved to Windows */
 	  case IDM_PUTTY:
-	    if((INT_PTR)ShellExecute(hwnd, NULL, putty_path, _T(""), _T(""),
-				 SW_SHOW) <= 32) {
-		MessageBox(NULL, "Unable to execute PuTTY!",
-			   "Error", MB_OK | MB_ICONERROR);
-	    }
+            {
+                TCHAR cmdline[10];
+                cmdline[0] = '\0';
+                if (restrict_putty_acl)
+                    strcat(cmdline, "&R");
+
+                if((INT_PTR)ShellExecute(hwnd, NULL, putty_path, cmdline,
+                                         _T(""), SW_SHOW) <= 32) {
+                    MessageBox(NULL, "Unable to execute PuTTY!",
+                               "Error", MB_OK | MB_ICONERROR);
+                }
+            }
 	    break;
 	  case IDM_CLOSE:
 	    if (passphrase_box)
@@ -912,7 +949,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT message,
 		    mii.cch = MAX_PATH;
 		    mii.dwTypeData = buf;
 		    GetMenuItemInfo(session_menu, wParam, FALSE, &mii);
-		    strcpy(param, "@");
+                    param[0] = '\0';
+                    if (restrict_putty_acl)
+                        strcat(param, "&R");
+		    strcat(param, "@");
 		    strcat(param, mii.dwTypeData);
 		    if((INT_PTR)ShellExecute(hwnd, NULL, putty_path, param,
 					 _T(""), SW_SHOW) <= 32) {
@@ -1089,14 +1129,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show)
      * Determine whether we're an NT system (should have security
      * APIs) or a non-NT system (don't do security).
      */
-    if (!init_winver())
-    {
-	modalfatalbox("Windows refuses to report a version");
-    }
-    if (osVersion.dwPlatformId == VER_PLATFORM_WIN32_NT) {
-	has_security = TRUE;
-    } else
-	has_security = FALSE;
+    init_winver();
+    has_security = (osPlatformId == VER_PLATFORM_WIN32_NT);
 
     if (has_security) {
 #ifndef NO_SECURITY
@@ -1169,6 +1203,9 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show)
                    !strcmp(argv[i], "-restrict_acl") ||
                    !strcmp(argv[i], "-restrictacl")) {
             restrict_process_acl();
+        } else if (!strcmp(argv[i], "-restrict-putty-acl") ||
+                   !strcmp(argv[i], "-restrict_putty_acl")) {
+            restrict_putty_acl = TRUE;
 	} else if (!strcmp(argv[i], "-c")) {
 	    /*
 	     * If we see `-c', then the rest of the
